@@ -1,0 +1,275 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --radius: 0.625rem;
+    --sidebar: oklch(0.985 0 0);
+    --sidebar-foreground: oklch(0.145 0 0);
+    --sidebar-primary: oklch(0.205 0 0);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.97 0 0);
+    --sidebar-accent-foreground: oklch(0.205 0 0);
+    --sidebar-border: oklch(0.922 0 0);
+    --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0);
+    --secondary-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: oklch(0.556 0 0);
+    --chart-1: oklch(0.87 0 0);
+    --chart-2: oklch(0.556 0 0);
+    --chart-3: oklch(0.439 0 0);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+/* ---------------------------------------------------------------------------
+   Ring theme. Dark-first, after Oura's 2026 system.
+
+   The DATA colours below are the validated categorical palette (validated with
+   the dataviz validator: three sleep slots pass all-pairs in both modes; the
+   status trio is used one-at-a-time and always paired with a text label, so the
+   adjacent-pair gates do not apply to it). Do not "tidy" these hexes.
+--------------------------------------------------------------------------- */
+:root {
+  /* Warm paper rather than white. The near-white surface was uncomfortable to
+     read at night. Validated on the new surface: the diverging pair still
+     clears every gate, and the sleep-stage set fails exactly as it did on white
+     -- on the deliberately-neutral 'awake' swatch, not on anything the cream
+     changed. Orange drops to 2.97:1, relieved by the legend and table view the
+     hypnogram already ships. */
+  --plane:#e3e0d6; --surface-1:#edeae0; --surface-2:#e7e4d9; --raise:#d8d4c7;
+  /* Trend bars. --raise sits a hair off the card colour -- fine for a panel
+     edge, useless for a MARK you have to read the length of, which is why the
+     unselected bars were effectively invisible. This is a mark colour, sized
+     for contrast against --surface-1, not a surface. */
+  --bar:#847d6e;   /* 3.39:1 on the card -- a mark you read, not a surface */
+  --ink:#17150f; --ink-2:#4e4a42; --ink-3:#7e786c;
+  --hairline:#cbc6b7;
+  /* Stage steps darkened one notch for the dimmer surface. On the original
+     near-white they were fine; against #edeae0 orange and aqua both slid well
+     under 3:1. The darker aqua alternative (#15855c) fixed contrast but pushed
+     CVD separation from 9.4 to 6.5, and telling two stages apart matters more
+     than a hair of contrast -- the legend and table view relieve the latter. */
+  --deep:#2a78d6; --light-stage:#d95926; --rem:#199e70; --awake:#c3c2b7;
+  --brand:#2a78d6;
+  --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+  /* Diverging pair for sleep debt: surplus vs deficit around a zero baseline.
+     Documented blue<->red poles with a NEUTRAL midpoint -- never a hue at zero.
+     These are the SERIES red, not --critical: a status colour must not
+     impersonate a series. Validated on both real surfaces (all-pairs):
+     light CVD dE 21.6 / normal 32.3, dark 19.2 / 29.0. */
+  --surplus:#2a78d6; --deficit:#e34948; --midpoint:#dedacc;
+}
+.dark {
+  --plane:#08090b; --surface-1:#111419; --surface-2:#181c23; --raise:#1e232b;
+  --bar:#5b6472;
+  --ink:#f7f8fa; --ink-2:#aab2be; --ink-3:#69717e;
+  --hairline:#222831;
+  --deep:#3987e5; --light-stage:#d95926; --rem:#199e70; --awake:#3a4049;
+  --brand:#3987e5;
+  --surplus:#3987e5; --deficit:#e66767; --midpoint:#383835;
+}
+
+/* map shadcn tokens onto the ring palette so its components inherit the theme */
+:root {
+  --background: var(--plane);
+  --foreground: var(--ink);
+  --card: var(--surface-1);
+  --card-foreground: var(--ink);
+  --popover: var(--surface-1);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: var(--surface-2);
+  --secondary-foreground: var(--ink);
+  --muted: var(--surface-2);
+  --muted-foreground: var(--ink-3);
+  --accent: var(--surface-2);
+  --accent-foreground: var(--ink);
+  --destructive: var(--critical);
+  --border: var(--hairline);
+  --input: var(--hairline);
+  --ring: var(--brand);
+  --radius: 1rem;
+}
+
+@theme inline {
+  --color-plane: var(--plane);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-raise: var(--raise);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-hairline: var(--hairline);
+  --color-stage-deep: var(--deep);
+  --color-stage-light: var(--light-stage);
+  --color-stage-rem: var(--rem);
+  --color-stage-awake: var(--awake);
+  --color-brand: var(--brand);
+  --color-good: var(--good);
+  --color-warning: var(--warning);
+  --color-critical: var(--critical);
+  --color-surplus: var(--surplus);
+  --color-deficit: var(--deficit);
+  --color-midpoint: var(--midpoint);
+}
+
+html, body, #root { background: var(--plane); }
+body {
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  padding: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 2.5rem);
+}
+.tnum { font-variant-numeric: tabular-nums; }
+@keyframes rise { from { opacity:0; transform:translateY(9px) } to { opacity:1; transform:none } }
+.rise { animation: rise .5s cubic-bezier(.22,.75,.3,1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .rise { animation: none }
+  .arc, .barfill { transition: none !important }
+}
+.arc { transition: stroke-dashoffset 1.25s cubic-bezier(.2,.72,.28,1); }
+.barfill { transition: width 1s cubic-bezier(.2,.72,.28,1); }
+
+/* Sequential band ramp for the HRV / SpO2 timelines.
+   Validated with the dataviz ordinal checks: one hue, monotone lightness,
+   adjacent gaps >= 0.06 L, light end clearing 2:1 on its own surface.
+   Light mode runs light->dark as value rises; DARK MODE RUNS THE OTHER WAY --
+   on a dark surface a "darker" step recedes into the background, so higher
+   values must get brighter, not darker. */
+:root {
+  --band-1:#86b6ef; --band-2:#3987e5; --band-3:#256abf; --band-4:#184f95; --band-5:#0d366b;
+}
+.dark {
+  --band-1:#184f95; --band-2:#256abf; --band-3:#3987e5; --band-4:#6da7ec; --band-5:#cde2fb;
+}
+
+/* Pulsing heart. Rate is cosmetic, not a readout of actual bpm -- animating at
+   the measured rate would imply live streaming, which this is not. */
+@keyframes heartbeat {
+  0%, 100% { transform: scale(1); }
+  14%      { transform: scale(1.18); }
+  28%      { transform: scale(1); }
+  42%      { transform: scale(1.12); }
+  70%      { transform: scale(1); }
+}
+.heartbeat { animation: heartbeat 1.6s ease-in-out infinite; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) { .heartbeat { animation: none } }
+
+/* Recharts moves focus to an internal <g> on tap, and the browser paints its
+   default 5px focus ring around it -- a blue box round the entire plot, on a
+   node the user never asked to focus. Those nodes are tabindex="-1", so they
+   are not keyboard-reachable and the ring carries no information. Scoped to
+   chart internals: real focus rings on buttons, nav and links are untouched. */
+.recharts-wrapper [tabindex="-1"]:focus,
+.recharts-wrapper [tabindex="-1"]:focus-visible,
+.recharts-wrapper svg:focus,
+.recharts-wrapper svg:focus-visible {
+  outline: none;
+}
