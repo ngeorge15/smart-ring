@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ring · Web Bluetooth probe</title>
+<style>
+  :root {
+    --plane:#08090b; --surface:#111419; --raise:#1e232b; --hairline:#222831;
+    --ink:#f7f8fa; --ink-2:#aab2be; --ink-3:#69717e;
+    --brand:#3987e5; --good:#0ca30c; --critical:#e66767; --warning:#fab219;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:18px 15px calc(18px + env(safe-area-inset-bottom));
+    background:var(--plane); color:var(--ink);
+    font:15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1 { font-size:22px; font-weight:660; letter-spacing:-.02em; margin:0 0 2px; }
+  .sub { color:var(--ink-3); font-size:12.5px; margin:0 0 16px; }
+  .card {
+    background:var(--surface); border:1px solid var(--hairline); border-radius:14px;
+    padding:15px; margin-bottom:12px;
+  }
+  h2 {
+    font-size:11px; font-weight:660; text-transform:uppercase; letter-spacing:.11em;
+    color:var(--ink-3); margin:0 0 10px;
+  }
+  button {
+    -webkit-appearance:none; appearance:none; width:100%; min-height:46px;
+    border-radius:11px; border:1px solid var(--hairline); background:var(--raise);
+    color:var(--ink); font:inherit; font-weight:560; margin-bottom:8px;
+  }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  button:disabled { opacity:.4; }
+  button:active { transform:scale(.985); }
+  .row { display:flex; gap:8px; }
+  .row button { margin-bottom:0; }
+  #log {
+    font:11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space:pre-wrap; word-break:break-word;
+    max-height:44vh; overflow-y:auto; margin:0;
+    -webkit-user-select:text; user-select:text;
+  }
+  .ok   { color:var(--good); }
+  .err  { color:var(--critical); }
+  .warn { color:var(--warning); }
+  .dim  { color:var(--ink-3); }
+  .b    { color:var(--brand); }
+  .banner {
+    border-left:3px solid var(--warning); padding:8px 0 8px 11px;
+    font-size:12.5px; color:var(--ink-2); margin:0 0 12px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Web Bluetooth probe</h1>
+<p class="sub">Does Bluefy talk to the R02? <b id="ver" style="color:var(--brand)">build 14:23</b></p>
+
+<div id="unsupported" class="banner" hidden></div>
+
+<div class="card">
+  <h2>1 · Connect</h2>
+  <button id="pick" class="primary">Pick ring (filtered)</button>
+  <button id="pickAll">Pick from all devices</button>
+  <p class="sub" style="margin:6px 0 0">
+    Use the first button and look for <b style="color:var(--ink-2)">COLMI R02_C302</b>.
+    It can take ~10s to appear — the chooser fills in as devices advertise, so
+    don't give up on an empty list. The second button lists every nearby
+    device, most of them unnamed, and is only a fallback.
+  </p>
+</div>
+
+<div class="card">
+  <h2>2 · Probe</h2>
+  <button id="enumerate" disabled>List services &amp; characteristics</button>
+  <div class="row" style="margin-bottom:8px">
+    <button id="battery" disabled>Battery (UART)</button>
+    <button id="bigdata" disabled>Sleep (big data)</button>
+  </div>
+  <button id="disconnect" disabled>Disconnect</button>
+</div>
+
+<div class="card">
+  <h2>3 · Can this be automated?</h2>
+  <button id="autotest">Test auto-reconnect (no tap needed)</button>
+  <p class="sub" style="margin:6px 0 0">
+    <code>requestDevice()</code> always needs a tap — that's the spec. But
+    <code>getDevices()</code> doesn't. If it works here, a Shortcut could open
+    this page on a schedule and it would sync with no interaction.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <div class="row" style="margin-bottom:10px">
+    <button id="send" class="primary">Send to Mac</button>
+    <button id="copy">Copy</button>
+  </div>
+  <pre id="log" class="dim">Waiting.</pre>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ constants
+   Web Bluetooth requires LOWERCASE 128-bit UUIDs. The Python side stores the
+   UART service uppercase, which Chrome/WebKit will reject outright. */
+const UART_SVC = "6e40fff0-b5a3-f393-e0a9-e50e24dcca9e";
+const UART_RX  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";  // write
+const UART_TX  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";  // notify
+
+const V2_SVC    = "de5bf728-d711-4e47-af26-65e3012a5dc7";
+const V2_CMD    = "de5bf72a-d711-4e47-af26-65e3012a5dc7";  // write
+const V2_NOTIFY = "de5bf729-d711-4e47-af26-65e3012a5dc7";  // notify
+
+const CMD_BATTERY = 3;
+const BIG_DATA_CMD = 0xbc, TYPE_SLEEP = 0x27;
+
+/* ---------------------------------------------------------------------- utils */
+const logEl = document.getElementById("log");
+let first = true;
+function log(msg, cls) {
+  if (first) { logEl.textContent = ""; first = false; }
+  const line = document.createElement("span");
+  if (cls) line.className = cls;
+  const t = new Date().toLocaleTimeString(undefined, { hour12:false });
+  line.textContent = `${t}  ${msg}\n`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+const hex = (dv) => [...new Uint8Array(dv.buffer ?? dv)]
+  .map(b => b.toString(16).padStart(2, "0")).join(" ");
+
+/** 16-byte command frame, last byte = sum of all bytes & 0xFF. Mirrors
+    colmi_r02_client.packet.make_packet exactly. */
+function makePacket(command, sub = []) {
+  const p = new Uint8Array(16);
+  p[0] = command;
+  sub.forEach((b, i) => { p[i + 1] = b; });
+  p[15] = p.reduce((a, b) => a + b, 0) & 0xff;
+  return p;
+}
+/* The big-data service does NOT use the 16-byte checksummed framing. */
+const bigDataRequest = (kind) =>
+  new Uint8Array([BIG_DATA_CMD, kind, 0x01, 0x00, 0xff, 0x00, 0xff]);
+
+/* ---------------------------------------------------------------------- state */
+let device = null, server = null;
+const chars = {};
+const btn = (id) => document.getElementById(id);
+function setConnected(on) {
+  ["enumerate", "battery", "bigdata", "disconnect"].forEach(id => btn(id).disabled = !on);
+}
+
+/* Bluefy is a separate app from Safari, and Web Bluetooth needs a secure
+   context. Say which one is missing rather than failing silently on tap. */
+(function checkSupport() {
+  const el = document.getElementById("unsupported");
+  if (!window.isSecureContext) {
+    el.hidden = false;
+    el.innerHTML = "<b>Not a secure context.</b> Web Bluetooth needs HTTPS. " +
+      "Open this through your Tailscale <code>serve</code> HTTPS URL, not a raw IP or file://.";
+  } else if (!navigator.bluetooth) {
+    el.hidden = false;
+    el.innerHTML = "<b>No Web Bluetooth in this browser.</b> Safari and Chrome on " +
+      "iOS do not implement it. Open this page in <b>Bluefy</b>.";
+  }
+})();
+
+/* -------------------------------------------------------- automation probe
+   getDevices() returns devices already granted to this origin, and unlike
+   requestDevice() it needs no user gesture -- so a page could reconnect on
+   load. Chrome ships it; WebKit-based browsers often do not. This is the single
+   fact that decides whether scheduled sync is possible without a native app. */
+btn("autotest").onclick = async () => {
+  if (!navigator.bluetooth) { log("no Web Bluetooth at all", "err"); return; }
+  if (typeof navigator.bluetooth.getDevices !== "function") {
+    log("getDevices() NOT supported", "err");
+    log("=> scheduled auto-sync is impossible here; every sync needs a tap.", "warn");
+    log("=> background sync would need a native app (CoreBluetooth).", "dim");
+    return;
+  }
+  try {
+    const devs = await navigator.bluetooth.getDevices();
+    log(`getDevices() supported — ${devs.length} remembered device(s)`, "ok");
+    devs.forEach(d => log(`   ${d.name || "(unnamed)"}  id=${d.id}`, "dim"));
+    if (devs.length) {
+      log("=> AUTO-SYNC IS POSSIBLE: a Shortcut can open this page on a", "ok");
+      log("   schedule and it can reconnect with no tap.", "ok");
+    } else {
+      log("supported, but nothing remembered yet — connect once, then retest.", "warn");
+    }
+  } catch (e) {
+    log(`getDevices() failed: ${e.name}: ${e.message}`, "err");
+  }
+};
+
+/* ------------------------------------------------------------- log transport
+   Reading a log off a phone screen by hand loses lines. Both routes send the
+   FULL buffer, not just the visible portion. */
+const logText = () => logEl.innerText;
+
+btn("copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(logText());
+    log("log copied to clipboard", "ok");
+  } catch {
+    const r = document.createRange();
+    r.selectNodeContents(logEl);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    log("couldn't auto-copy — log is selected, use the popup", "warn");
+  }
+};
+
+btn("send").onclick = async () => {
+  log("sending to Mac…", "dim");
+  try {
+    const res = await fetch("/probe-log", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: logText(),
+    });
+    log(res.ok ? `sent to Mac ✓ (HTTP ${res.status})` : `send failed: HTTP ${res.status}`,
+        res.ok ? "ok" : "err");
+  } catch (e) {
+    log(`send failed: ${e.name}: ${e.message}`, "err");
+    log("(the Mac serves this page, so it must still be running)", "dim");
+  }
+};
+
+/* DO NOT race gatt.connect() against a timeout.
+   The first version did, at 15s, and on real hardware the connect returned
+   AFTER that -- so the page reported failure, disabled every button, and left
+   the ring connected with no way to use it. Rejecting the race also does not
+   cancel the underlying connect, so the UI and the radio disagreed.
+   The wait is now unbounded and reports progress instead; Disconnect stays live
+   as the escape hatch. A slow connect is normal here: observed 6.6s warm and
+   >15s cold. */
+const BEAT_MS = 5000;
+
+/* ------------------------------------------------------------------- connect */
+async function connect(opts) {
+  try {
+    log("requesting device…");
+    device = await navigator.bluetooth.requestDevice(opts);
+    log(`selected: ${device.name || "(unnamed)"}  id=${device.id}`, "ok");
+    device.addEventListener("gattserverdisconnected", () => {
+      log("disconnected", "warn"); setConnected(false);
+    });
+
+    log("connecting to GATT… (can take 30s+, leave this open)");
+    btn("disconnect").disabled = false;   // escape hatch while we wait
+
+    const t0 = Date.now();
+    let done = false;
+    const beat = setInterval(() => {
+      if (done) return clearInterval(beat);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      log(`still connecting… ${secs}s`, "dim");
+      if (secs >= 45) {
+        log("unusually slow — if it never lands, Forget This Device in " +
+            "iPhone Settings > Bluetooth, then reload.", "warn");
+      }
+    }, BEAT_MS);
+
+    try {
+      server = await device.gatt.connect();
+    } finally {
+      done = true; clearInterval(beat);
+    }
+
+    log(`GATT connected in ${((Date.now() - t0) / 1000).toFixed(1)}s`, "ok");
+    setConnected(true);
+
+    try {
+      const svcs = await server.getPrimaryServices();
+      log(`${svcs.length} service(s) visible`, "ok");
+    } catch (e) {
+      log(`connected, but discovery failed: ${e.message}`, "warn");
+    }
+    log("tap the probe buttons now — the ring drops idle links after ~30s", "b");
+  } catch (e) {
+    log(`connect failed: ${e.name || "Error"}: ${e.message}`, "err");
+    if (/cancel/i.test(String(e))) {
+      log("(the chooser was dismissed — nothing was selected)", "dim");
+    } else {
+      log("If the ring shows as connected on the phone anyway, iOS is holding", "dim");
+      log("it: Settings > Bluetooth > COLMI > Forget This Device, then reload.", "dim");
+    }
+    setConnected(false);
+  }
+}
+
+btn("pick").onclick = () => connect({
+  // Captured from a live scan 2026-08-24: the ring advertises local_name
+  // "COLMI R02_C302" and an EMPTY service-uuid list. So a {services:[...]}
+  // filter can never match it -- only the name can. "R02" as a prefix also
+  // fails, because the name starts with "COLMI". Both services still have to
+  // appear in optionalServices to be reachable after connecting.
+  filters: [{ namePrefix: "COLMI" }, { namePrefix: "R02" }],
+  optionalServices: [UART_SVC, V2_SVC],
+});
+btn("pickAll").onclick = () => connect({
+  acceptAllDevices: true,
+  optionalServices: [UART_SVC, V2_SVC],
+});
+
+btn("disconnect").onclick = () => {
+  if (device?.gatt.connected) device.gatt.disconnect();
+  setConnected(false);
+};
+
+/* ----------------------------------------------------------------- enumerate */
+btn("enumerate").onclick = async () => {
+  try {
+    const services = await server.getPrimaryServices();
+    log(`${services.length} primary service(s):`, "b");
+    for (const s of services) {
+      log(`  ${s.uuid}`);
+      let cs = [];
+      try { cs = await s.getCharacteristics(); }
+      catch (e) { log(`    (characteristics unavailable: ${e.message})`, "warn"); }
+      for (const c of cs) {
+        const p = c.properties;
+        const flags = ["read","write","writeWithoutResponse","notify","indicate"]
+          .filter(k => p[k]).join(",");
+        log(`    ${c.uuid}  [${flags}]`, "dim");
+      }
+    }
+    log("enumeration done", "ok");
+  } catch (e) {
+    log(`enumerate failed: ${e.name}: ${e.message}`, "err");
+    log("If services are missing, they were not in optionalServices at request time.", "dim");
+  }
+};
+
+/* ------------------------------------------------------- notification helper */
+async function subscribe(svcUuid, charUuid, label) {
+  const key = `${svcUuid}|${charUuid}`;
+  if (chars[key]) return chars[key];
+  const svc = await server.getPrimaryService(svcUuid);
+  const ch = await svc.getCharacteristic(charUuid);
+  await ch.startNotifications();
+  ch.addEventListener("characteristicvaluechanged", (ev) => {
+    log(`${label} <- ${hex(ev.target.value)}`, "b");
+  });
+  chars[key] = ch;
+  log(`subscribed to ${label}`, "ok");
+  return ch;
+}
+
+async function writeTo(svcUuid, charUuid, bytes) {
+  const svc = await server.getPrimaryService(svcUuid);
+  const ch = await svc.getCharacteristic(charUuid);
+  // Some stacks only expose one of these; try the response-less form first.
+  if (ch.properties.writeWithoutResponse && ch.writeValueWithoutResponse) {
+    await ch.writeValueWithoutResponse(bytes);
+  } else if (ch.writeValueWithResponse) {
+    await ch.writeValueWithResponse(bytes);
+  } else {
+    await ch.writeValue(bytes);
+  }
+}
+
+/* ------------------------------------------------------------------- probes */
+btn("battery").onclick = async () => {
+  try {
+    await subscribe(UART_SVC, UART_TX, "UART");
+    const pkt = makePacket(CMD_BATTERY);
+    log(`UART -> ${hex(pkt)}`);
+    await writeTo(UART_SVC, UART_RX, pkt);
+    log("battery request sent — expect a reply starting 03", "dim");
+  } catch (e) {
+    log(`battery probe failed: ${e.name}: ${e.message}`, "err");
+  }
+};
+
+btn("bigdata").onclick = async () => {
+  try {
+    await subscribe(V2_SVC, V2_NOTIFY, "V2");
+    const pkt = bigDataRequest(TYPE_SLEEP);
+    log(`V2 -> ${hex(pkt)}`);
+    await writeTo(V2_SVC, V2_CMD, pkt);
+    log("sleep request sent — expect bc 27 … possibly over several chunks", "dim");
+  } catch (e) {
+    log(`big-data probe failed: ${e.name}: ${e.message}`, "err");
+  }
+};
+</script>
+</body>
+</html>

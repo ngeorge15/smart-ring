@@ -1,0 +1,31 @@
+{
+  "ring": {
+    "name": "COLMI R02_C302",
+    "cb_uuid": "B9606358-9C44-11D9-8CF4-7B42D630E23A",
+    "mac": "30:37:45:37:C3:02",
+    "worn_on": "right hand",
+    "hr_log_interval_min": 5
+  },
+  "reference": {
+    "device": "Apple Watch",
+    "worn_on": "left wrist"
+  },
+  "calibration": {
+    "dual_wear_started": "2026-08-23",
+    "min_paired_days_steps": 14,
+    "min_paired_nights_sleep": 7,
+    "notes": "Opposite limbs. Walking loads both arms similarly; single-hand activity (typing, mousing, carrying) loads them differently, which is the main source of step disagreement."
+  },
+  "sleep": {
+    "target_min": null,
+    "notes": "Nightly sleep target that sleep debt is measured against. null = use the standard 8h adult recommendation. Set an integer number of minutes (300-720) to override. Sleep NEED cannot be measured by a ring, so this is a declared value, not an inferred one."
+  },
+  "body": {
+    "dob": "2005-03-15",
+    "sex": "male",
+    "weight_kg": 81.6,
+    "height_cm": 172.7,
+    "source": "Apple Health export",
+    "notes": "Used for heart-rate based energy expenditure. Update weight here if it changes."
+  }
+}
