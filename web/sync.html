@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ring sync</title>
+<link rel="manifest" href="manifest.json">
+<style>
+  :root {
+    --plane:#08090b; --surface:#111419; --raise:#1e232b; --hairline:#222831;
+    --ink:#f7f8fa; --ink-2:#aab2be; --ink-3:#69717e;
+    --brand:#3987e5; --good:#0ca30c; --critical:#e66767; --warning:#fab219;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:18px 15px calc(24px + env(safe-area-inset-bottom));
+    background:var(--plane); color:var(--ink);
+    font:15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1 { font-size:24px; font-weight:660; letter-spacing:-.025em; margin:0 0 2px; }
+  .sub { color:var(--ink-3); font-size:12.5px; margin:0 0 16px; }
+  .card {
+    background:var(--surface); border:1px solid var(--hairline);
+    border-radius:14px; padding:16px; margin-bottom:12px;
+  }
+  #state { font-size:19px; font-weight:620; letter-spacing:-.01em; }
+  #detail { color:var(--ink-2); font-size:13px; margin-top:4px; }
+  .bar { height:6px; border-radius:3px; background:var(--raise); overflow:hidden; margin-top:12px; }
+  .bar > i { display:block; height:100%; width:0; background:var(--brand); transition:width .3s; }
+  button {
+    -webkit-appearance:none; appearance:none; width:100%; min-height:48px;
+    border-radius:12px; border:1px solid var(--hairline); background:var(--raise);
+    color:var(--ink); font:inherit; font-weight:560; margin-top:8px;
+  }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  button:disabled { opacity:.4; }
+  .rows { font-size:13px; }
+  .row { display:flex; justify-content:space-between; gap:10px;
+         padding:7px 0; border-top:1px solid var(--hairline); }
+  .row:first-child { border-top:0; }
+  .row b { font-weight:560; }
+  .muted { color:var(--ink-3); }
+  .ok { color:var(--good); } .err { color:var(--critical); } .warn { color:var(--warning); }
+  #log {
+    font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space:pre-wrap; word-break:break-word; max-height:32vh;
+    overflow-y:auto; margin:0; color:var(--ink-3);
+    -webkit-user-select:text; user-select:text;
+  }
+  h2 { font-size:11px; font-weight:660; text-transform:uppercase;
+       letter-spacing:.11em; color:var(--ink-3); margin:0 0 10px; }
+</style>
+</head>
+<body>
+
+<h1>Ring sync</h1>
+<p class="sub">build <b id="ver">1</b> · <span id="online">—</span></p>
+
+<div class="card">
+  <div id="state">Ready</div>
+  <div id="detail">Tap sync, or open this page from a Shortcut.</div>
+  <div class="bar"><i id="prog"></i></div>
+  <button id="go" class="primary">Sync now</button>
+</div>
+
+<div class="card" id="localCard" hidden>
+  <h2>On this phone <span id="localWhen" style="float:right;font-weight:500;
+      text-transform:none;letter-spacing:0"></span></h2>
+  <div id="localBody"></div>
+</div>
+
+<div class="card">
+  <h2>Queue</h2>
+  <div class="rows" id="queue"><div class="row muted">empty</div></div>
+  <button id="toDash" class="primary" hidden>Update dashboard</button>
+  <button id="drain">Upload queued</button>
+  <button id="report">Send log to Mac</button>
+  <button id="release">Release ring</button>
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <pre id="log">—</pre>
+</div>
+
+<script>
+/* =============================================================================
+   The phone is the CAPTURE device; the Mac is the archive and the statistician.
+
+   Everything protocol-specific arrives from /sync-plan at runtime, so adding a
+   command or changing a day range is a Python edit on the Mac with no change
+   here. This file knows only how to: write bytes, collect bytes, queue them,
+   and upload them.
+
+   The queue is what makes the Mac optional. A capture is written to IndexedDB
+   BEFORE any upload is attempted, so a sync with the Mac asleep is still a
+   successful sync -- the bytes drain later. That is what closes the overnight
+   gap: the phone is the always-on device, not the laptop.
+   ========================================================================== */
+
+const $ = (id) => document.getElementById(id);
+const PLAN_KEY = "ring-plan-v1";
+/* Declared HERE, before any consumer. It used to live further down, and the
+   foreground-sync code above it hit the temporal dead zone -- the whole script
+   died with "Cannot access 'MODE' before initialization". */
+const MODE = new URLSearchParams(location.search);
+
+let logBuf = [];
+function log(msg, cls) {
+  const t = new Date().toLocaleTimeString(undefined, { hour12: false });
+  logBuf.push(`${t}  ${msg}`);
+  const el = $("log");
+  el.textContent = logBuf.join("\n");
+  el.scrollTop = el.scrollHeight;
+}
+function setState(s, d, cls) {
+  $("state").textContent = s;
+  $("state").className = cls || "";
+  if (d !== undefined) $("detail").textContent = d;
+}
+const hex = (dv) => [...new Uint8Array(dv.buffer ?? dv)]
+  .map(b => b.toString(16).padStart(2, "0")).join("");
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/* Bluefy rejects gatt.connect() with a value that is NOT an Error -- reading
+   .name/.message off it produced "undefined: undefined" and cost a round trip.
+   Never assume a rejection is an Error. */
+function describeErr(e) {
+  if (e == null) return `empty rejection (${typeof e})`;
+  if (e.name || e.message) return `${e.name || "Error"}: ${e.message || "(no message)"}`;
+  if (typeof e === "string") return `string: ${e}`;
+  try { return `${typeof e}: ${JSON.stringify(e)}`; } catch { return `${typeof e}: ${String(e)}`; }
+}
+
+/* ------------------------------------------------------------------ IndexedDB */
+function idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("ring", 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains("captures")) {
+        r.result.createObjectStore("captures", { keyPath: "id" });
+      }
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbAll() {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const req = db.transaction("captures").objectStore("captures").getAll();
+    req.onsuccess = () => res(req.result || []);
+    req.onerror = () => rej(req.error);
+  });
+}
+async function idbPut(rec) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("captures", "readwrite");
+    tx.objectStore("captures").put(rec);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbDel(id) {
+  const db = await idb();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("captures", "readwrite");
+    tx.objectStore("captures").delete(id);
+    tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+  });
+}
+
+async function renderQueue() {
+  const all = await idbAll();
+  const el = $("queue");
+  if (!all.length) { el.innerHTML = '<div class="row muted">empty</div>'; return; }
+  el.innerHTML = all.sort((a, b) => b.id.localeCompare(a.id)).map(c => {
+    const got = c.steps.filter(s => s.chunks.length).length;
+    return `<div class="row"><b>${new Date(c.captured_at).toLocaleString()}</b>
+            <span class="muted">${got}/${c.steps.length} replies</span></div>`;
+  }).join("");
+}
+
+/* ------------------------------------------------------------------ the plan */
+async function getPlan() {
+  try {
+    const res = await fetch("/sync-plan", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const plan = await res.json();
+    localStorage.setItem(PLAN_KEY, JSON.stringify(plan));
+    log(`plan: ${plan.steps.length} steps (fresh)`);
+    return plan;
+  } catch (e) {
+    // The Mac being unreachable must not stop a sync -- that is the whole point
+    // of the queue. Fall back to the last plan we saw.
+    const cached = localStorage.getItem(PLAN_KEY);
+    if (!cached) throw new Error("no plan available and Mac unreachable");
+    const plan = JSON.parse(cached);
+    log(`plan: ${plan.steps.length} steps (cached — Mac unreachable)`, "warn");
+    return plan;
+  }
+}
+
+/* --------------------------------------------------------------- bluetooth */
+async function getRing() {
+  if (!navigator.bluetooth) throw new Error("no Web Bluetooth — open in Bluefy");
+  if (navigator.bluetooth.getDevices) {
+    const devs = await navigator.bluetooth.getDevices();
+    const ring = devs.find(d => /COLMI|R02/i.test(d.name || ""));
+    if (ring) return ring;
+  }
+  // No remembered grant yet: this REQUIRES a tap and cannot be automated.
+  log("no remembered device — asking for permission (needs a tap)", "warn");
+  return askForRing();
+}
+
+/**
+ * Wait until the browser actually SEES the ring advertise.
+ *
+ * A device handed back by getDevices() carries a permission grant, not a live
+ * sighting. After the app restarts the browser has no current advertisement for
+ * it, and connect() then fails immediately -- which is exactly the "works until
+ * I reopen Bluefy" symptom. watchAdvertisements() re-establishes that sighting.
+ * Not universally implemented, so its absence is a soft no.
+ */
+async function waitForAdvertisement(device, ms) {
+  if (typeof device.watchAdvertisements !== "function") return false;
+  let ac = null;
+  try {
+    ac = new AbortController();
+    await device.watchAdvertisements({ signal: ac.signal });
+  } catch (e) {
+    log(`watchAdvertisements unavailable: ${describeErr(e)}`, "dim");
+    return false;
+  }
+  log("waiting for the ring to advertise…");
+  return new Promise((resolve) => {
+    const done = (found) => {
+      clearTimeout(timer);
+      try { ac.abort(); } catch { /* already stopped */ }
+      resolve(found);
+    };
+    const timer = setTimeout(() => done(false), ms);
+    device.addEventListener("advertisementreceived", () => {
+      log("ring seen advertising", "ok");
+      done(true);
+    }, { once: true });
+  });
+}
+
+/**
+ * Connect with retries. The first attempt after an app restart often fails even
+ * though the ring is present, so a single failure is not treated as final.
+ */
+async function connectWithRetry(device, attempts = 3) {
+  const t0 = Date.now();
+  let last = null;
+  let sawAdvertisement = null;          // null = never checked
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const server = await device.gatt.connect();
+      /* A connect that resolves AFTER we gave up is worse than one that fails.
+         On 2026-08-25 attempt 2 resolved 1862s later -- half an hour after the
+         page was backgrounded and the sync abandoned -- handing back a live GATT
+         link that nothing was tracking, on a ring that accepts exactly one
+         connection. That is precisely the state that strands the ring and ends
+         in toggling iPhone Bluetooth. If we are no longer syncing, hand it
+         straight back. */
+      if (aborted) {
+        try { device.gatt.disconnect(); } catch { /* already gone */ }
+        log(`connect resolved after abort (${((Date.now() - t0) / 1000).toFixed(0)}s) — released`, "warn");
+        throw new Error("aborted while connecting");
+      }
+      return server;
+    } catch (e) {
+      if (aborted) throw e;             // do not retry into an abandoned sync
+      last = e;
+      log(`connect attempt ${i + 1} failed: ${describeErr(e)}`, "warn");
+      if (i === attempts - 1) break;
+      if (i === 0) sawAdvertisement = await waitForAdvertisement(device, 8000);
+      else await sleep(1500);
+    }
+  }
+  // A ring that never advertises during the wait is CONNECTED TO SOMETHING ELSE
+  // -- it only advertises when free. That is a different problem from a failed
+  // connect, and it has a different fix, so say so rather than just failing.
+  if (sawAdvertisement === false) {
+    log("the ring never advertised — it only does that when nothing is", "err");
+    log("connected to it. Something else is holding it:", "err");
+    log("  • force-quitting this app leaves the link open — toggle", "dim");
+    log("    iPhone Bluetooth OFF then ON to force-drop it", "dim");
+    log("  • or the QRing app has it — force-quit that", "dim");
+    log("  • next time, leave this page instead of swiping the app away", "dim");
+  }
+  throw last;
+}
+
+function askForRing() {
+  return navigator.bluetooth.requestDevice({
+    filters: [{ namePrefix: "COLMI" }, { namePrefix: "R02" }],
+    optionalServices: ["6e40fff0-b5a3-f393-e0a9-e50e24dcca9e",
+                       "de5bf728-d711-4e47-af26-65e3012a5dc7"],
+  });
+}
+
+async function runStep(server, step, cache) {
+  const key = step.service;
+  if (!cache[key]) cache[key] = await server.getPrimaryService(step.service);
+  const svc = cache[key];
+
+  const chunks = [];
+  const nk = key + step.notify;
+  if (!cache[nk]) {
+    const ch = await svc.getCharacteristic(step.notify);
+    await ch.startNotifications();
+    cache[nk] = ch;
+    cache.sinks = cache.sinks || {};
+    ch.addEventListener("characteristicvaluechanged",
+      (ev) => { const s = cache.sinks[step.notify]; if (s) s.push(hex(ev.target.value)); });
+  }
+  cache.sinks[step.notify] = chunks;
+
+  const wc = await svc.getCharacteristic(step.write);
+  const bytes = new Uint8Array(step.hex.match(/../g).map(h => parseInt(h, 16)));
+  if (wc.properties.writeWithoutResponse && wc.writeValueWithoutResponse) {
+    await wc.writeValueWithoutResponse(bytes);
+  } else {
+    await wc.writeValue(bytes);
+  }
+  await sleep(step.collect_ms);
+  cache.sinks[step.notify] = null;
+  return chunks;
+}
+
+/* ------------------------------------------------------------------- upload */
+/* Captures that could not reach IndexedDB. Lost on reload -- which is why they
+   are uploaded at the first opportunity rather than left to a later drain. */
+const memoryQueue = [];
+
+async function drain() {
+  let stored = [];
+  try { stored = await idbAll(); } catch (e) {
+    log(`queue unreadable (${describeErr(e)})`, "warn");
+  }
+  const all = [...stored, ...memoryQueue];
+  if (!all.length) { log("queue empty"); return 0; }
+  let sent = 0;
+  for (const cap of all) {
+    try {
+      const res = await fetch("/ingest", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cap),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      try { await idbDel(cap.id); } catch { /* never stored; nothing to delete */ }
+      const m = memoryQueue.indexOf(cap);
+      if (m >= 0) memoryQueue.splice(m, 1);
+      sent++;
+      log(`uploaded ${cap.id}`, "ok");
+    } catch (e) {
+      log(`upload failed (${e.message}) — kept in queue`, "warn");
+      break;                       // Mac is down; stop trying, keep the rest
+    }
+  }
+  try { await renderQueue(); } catch { /* cosmetic */ }
+  return sent;
+}
+
+/** Best-effort log upload. Never throws -- diagnostics must not break the page. */
+async function reportLog(tag) {
+  try {
+    const body = [
+      `--- ${tag} ---`,
+      `ua: ${navigator.userAgent}`,
+      `online: ${navigator.onLine}  secure: ${window.isSecureContext}`,
+      `bluetooth: ${!!navigator.bluetooth}  getDevices: ${typeof navigator.bluetooth?.getDevices}`,
+      ...logBuf,
+    ].join("\n");
+    await fetch("/probe-log", { method: "POST", headers: { "Content-Type": "text/plain" }, body });
+    log("log sent to Mac", "ok");
+  } catch (e) {
+    log(`could not send log: ${e.message}`, "warn");
+  }
+}
+
+/* --------------------------------------------------------------------- sync */
+let running = false;
+let aborted = false;
+async function sync(auto) {
+  if (running) return;
+  running = true;
+  aborted = false;
+  $("go").disabled = true;
+  let device = null;
+  try {
+    const plan = await getPlan();
+    setState("Connecting…", "the ring can take 30s", "");
+    device = await getRing();
+    activeDevice = device;
+    log(`device: ${device.name}`);
+
+    const t0 = Date.now();
+    let server;
+    try {
+      server = await connectWithRetry(device);
+    } catch (e1) {
+      // A device handed back by getDevices() may not be connectable even though
+      // the grant is remembered -- the ring has to be advertising, and a stale
+      // handle can simply refuse. Retrying through the chooser distinguishes
+      // "bad device handle" from "radio/ring unavailable", which the error
+      // string alone does not.
+      log(`connect via remembered device failed: ${describeErr(e1)}`, "warn");
+      log("retrying through the picker — choose COLMI R02_C302", "warn");
+      device = await askForRing();
+      activeDevice = device;
+      server = await device.gatt.connect();
+    }
+    log(`connected in ${((Date.now() - t0) / 1000).toFixed(1)}s`, "ok");
+
+    const cache = {};
+    const steps = [];
+    for (let i = 0; i < plan.steps.length; i++) {
+      if (aborted) { log("aborted — keeping what was collected", "warn"); break; }
+      const step = plan.steps[i];
+      setState("Syncing…", `${step.id} (${i + 1}/${plan.steps.length})`, "");
+      $("prog").style.width = `${((i + 1) / plan.steps.length) * 100}%`;
+      let chunks = [];
+      try {
+        chunks = await runStep(server, step, cache);
+        /* A short step that came back with NOTHING is retried once.
+           The ring occasionally misses a command issued while the link is still
+           settling, and there is no error to catch -- the reply simply never
+           arrives and the step returns an empty array. That is indistinguishable
+           from "no data for this day", which is why a missing battery reading
+           went unnoticed across two syncs. Only cheap steps qualify: re-running
+           the 12s heart-rate collection would double the sync for no reason. */
+        if (!chunks.length && step.collect_ms <= 2500) {
+          log(`${step.id}: no reply — retrying once`, "warn");
+          await sleep(300);
+          chunks = await runStep(server, step, cache);
+        }
+      } catch (e) {
+        log(`${step.id}: ${describeErr(e)}`, "err");
+      }
+      log(`${step.id}: ${chunks.length} chunk(s)`);
+      steps.push({ id: step.id, kind: step.kind, day: step.day,
+                   day_offset: step.day_offset, chunks });
+    }
+
+    const capture = {
+      id: new Date().toISOString(),
+      captured_at: Date.now(),
+      source: auto ? "auto" : "manual",
+      plan_version: plan.version,
+      steps,
+    };
+    /* Persist BEFORE uploading: a sync with the Mac asleep is still a success.
+
+       But a store failure must NOT destroy a sync that already succeeded. On
+       2026-08-25 Bluefy's IndexedDB threw "An internal error was encountered in
+       the Indexed Database server" and took a completed capture down with it --
+       33 seconds of the ring's time, thrown away at the last step, with the
+       bytes already in hand. Whatever happens here, the capture stays in memory
+       and is still offered to the Mac. */
+    let persisted = false;
+    try {
+      await idbPut(capture);
+      persisted = true;
+      log("capture saved locally", "ok");
+    } catch (e) {
+      log(`local store failed (${describeErr(e)}) — keeping it in memory`, "warn");
+    }
+    if (!persisted) memoryQueue.push(capture);
+    try { await renderQueue(); } catch { /* store is the thing that is broken */ }
+    // The local view lives in a module script; it cannot see these variables, so
+    // the capture is PASSED as well as announced -- reading it back out of the
+    // store is exactly what fails when the store is the problem.
+    dispatchEvent(new CustomEvent("ring:capture", { detail: capture }));
+
+    releaseRing("sync complete");
+
+    const got = steps.filter(s => s.chunks.length).length;
+    if (got) markSynced();
+    const sent = await drain();
+
+    /* The dashboard is a baked snapshot, so uploading is not enough -- the Mac
+       has to regenerate it before the new readings are visible. Done here so
+       the caller lands on a page that already reflects this sync. */
+    if (sent) {
+      try {
+        setState("Rebuilding…", "asking the Mac to refresh the dashboard", "");
+        await fetch("/rebuild", { method: "POST" });
+      } catch { log("rebuild request failed — data is stored either way", "warn"); }
+    }
+    const back = MODE.get("return");
+    if (back) {
+      // Only relative paths: a `return` value is attacker-controllable in a URL
+      // and must never be able to send someone off-site.
+      const safe = /^[\w.-]+(\.html)?(\?[\w=&.-]*)?$/.test(back) ? back : "index.html";
+      log(`returning to ${safe}`, "ok");
+      setTimeout(() => { location.href = safe; }, 600);
+    }
+    setState(sent ? "Synced" : "Saved locally",
+             `${got}/${steps.length} replies · ${sent ? "uploaded" : "queued for the Mac"}`,
+             "ok");
+  } catch (e) {
+    log(`sync failed: ${describeErr(e)}`, "err");
+    if (e && e.stack) log(String(e.stack).split("\n").slice(0, 3).join(" | "), "err");
+    setState("Failed", /ring never advertised/.test(logBuf.join(" "))
+      ? "ring is held — toggle iPhone Bluetooth off/on" : describeErr(e), "err");
+    // A failure that reports nothing is the worst outcome: it costs a whole
+    // round trip to learn one error string. Push the log to the Mac on the way
+    // down, best effort.
+    await reportLog("sync-failed");
+  } finally {
+    // Release on EVERY exit path, success or failure. Leaving the link open is
+    // what makes the ring unreachable after a force-quit, since a killed app
+    // never fires pagehide.
+    releaseRing("sync ended");
+    running = false;
+    $("go").disabled = false;
+    $("prog").style.width = "0";
+  }
+}
+
+/* --------------------------------------------------------------------- boot */
+/* Release the ring when the page goes away.
+   A backgrounded page keeps its GATT link open, and this ring accepts only ONE
+   connection -- so an abandoned tab silently locks out the next sync, the Mac,
+   and the ring's own app. Every exit path must disconnect. */
+let activeDevice = null;
+/** Disconnect and CONFIRM it took. Returns true if the ring is free afterwards.
+    A silent disconnect that failed is indistinguishable from one that worked,
+    and the cost of being wrong is a ring nothing can reach until the phone's
+    Bluetooth is toggled. */
+function releaseRing(why) {
+  const d = activeDevice;
+  if (!d || !d.gatt) return true;
+  if (!d.gatt.connected) { activeDevice = null; return true; }
+  try {
+    d.gatt.disconnect();
+  } catch (e) {
+    log(`release failed: ${describeErr(e)}`, "err");
+    return false;
+  }
+  const free = !d.gatt.connected;
+  log(free ? `ring released (${why})` : `release requested but still connected (${why})`,
+      free ? "ok" : "warn");
+  if (free) activeDevice = null;
+  return free;
+}
+/* Backgrounding is the LAST moment code can run before a force-quit: opening
+   the app switcher hides the page, and only then can you swipe the app away.
+   So this is the one chance to hand the ring back.
+
+   It releases even mid-sync. The earlier version skipped that case to avoid
+   interrupting a sync, which was wrong twice over: iOS suspends a hidden page
+   so the sync cannot proceed anyway, and the abandoned link is exactly what
+   leaves the ring unreachable afterwards. An aborted sync costs one tap; a
+   stranded ring costs a Bluetooth toggle. */
+addEventListener("pagehide", () => { aborted = true; releaseRing("page hidden"); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") { onForeground(); return; }
+  if (running) {
+    aborted = true;
+    log("backgrounded mid-sync — aborting and releasing the ring", "warn");
+  }
+  releaseRing("backgrounded");
+});
+// Restored from the back/forward cache -- `load` does not fire again for this.
+addEventListener("pageshow", (e) => { if (e.persisted) onForeground(); });
+
+/* Sync when the app comes to the FOREGROUND, not only on page load.
+   `load` fires once per page, so bringing Bluefy back from the background never
+   re-triggered a sync -- which is why force-quitting seemed necessary to get a
+   cold start. Force-quitting is also the one thing that strands the ring, since
+   no cleanup code can run. Syncing on foreground removes the reason to do it.
+
+   A cooldown stops every app switch from starting a 40s sync; it lives in
+   localStorage so it survives reloads too. */
+/* Default 0: sync on EVERY foreground. `?every=N` adds an N-minute cooldown if
+   that turns out to be too eager. Parsed with Number.isFinite rather than `||`
+   so that `every=0` is honoured instead of falling through as falsy. */
+const _every = parseInt(MODE.get("every"), 10);
+const AUTO_COOLDOWN_MS = (Number.isFinite(_every) ? _every : 0) * 60 * 1000;
+const LAST_KEY = "ring-last-sync";
+
+function sinceLastSync() {
+  try {
+    const t = parseInt(localStorage.getItem(LAST_KEY) || "0", 10);
+    return t ? Date.now() - t : Infinity;
+  } catch { return Infinity; }
+}
+function markSynced() {
+  try { localStorage.setItem(LAST_KEY, String(Date.now())); } catch { /* private mode */ }
+}
+
+function onForeground() {
+  if (MODE.get("auto") !== "1" || running) return;
+  const age = sinceLastSync();
+  if (AUTO_COOLDOWN_MS > 0 && age < AUTO_COOLDOWN_MS) {
+    const mins = Math.round(age / 60000);
+    log(`foreground: last sync ${mins}m ago, cooldown ${AUTO_COOLDOWN_MS / 60000}m — skipping`);
+    setState("Up to date", `synced ${mins}m ago`, "ok");
+    return;
+  }
+  log("foreground: starting sync");
+  sync(true);
+}
+
+addEventListener("error", (e) => {
+  log(`uncaught: ${e.message} @ ${e.filename}:${e.lineno}`, "err");
+});
+addEventListener("unhandledrejection", (e) => {
+  log(`unhandled rejection: ${e.reason?.message || e.reason}`, "err");
+});
+
+$("go").onclick = () => sync(false);
+$("report").onclick = () => reportLog("manual");
+$("release").onclick = () => {
+  const free = releaseRing("manual");
+  setState(free ? "Ring released" : "Still connected",
+           free ? "safe to close the app" : "try toggling iPhone Bluetooth",
+           free ? "ok" : "warn");
+};
+$("drain").onclick = () => drain();
+
+/* Independence self-check: the phone is only Mac-free if the page itself is
+   cached, IndexedDB works, and the params blob is stored. Bluefy is a WebKit
+   browser and service-worker support there is the one thing that cannot be
+   verified from the Mac -- so it is reported here rather than assumed. */
+async function selfCheck() {
+  const bits = [];
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    bits.push(`sw:${reg ? (navigator.serviceWorker.controller ? "active" : "registered") : "NO"}`);
+  } catch { bits.push("sw:NO"); }
+  try { await idb(); bits.push("idb:ok"); } catch { bits.push("idb:NO"); }
+  bits.push(localStorage.getItem(PLAN_KEY) ? "plan:cached" : "plan:none");
+  /* Report the store that ACTUALLY backs offline scoring here. This asked the
+     service-worker Cache, which in Bluefy is never populated (sw:NO), so it
+     reported "params:none" forever regardless of the truth -- and hid the real
+     bug underneath it, that nothing was mirroring params to localStorage. */
+  bits.push(localStorage.getItem("ring-params-v1") ? "params:cached" : "params:none");
+  bits.push(localStorage.getItem("ring-local-v1") ? "local:cached" : "local:none");
+  log("offline readiness → " + bits.join("  "));
+}
+
+/* Refresh this page's OWN cache entry in the background, whenever online.
+
+   sync.html is served max-age=86400 so that Bluefy -- which has no service
+   worker -- can open it with the Mac unreachable. The cost of that guarantee is
+   staleness: ship a fix and the phone could keep the old page for a day. This
+   pays it back. The fetch REPLACES the cache entry without touching the running
+   page, so the next open is current; worst case you are one launch behind
+   instead of 24 hours.
+
+   Deliberately fire-and-forget: offline it fails, which is exactly the state
+   the cache exists for, so a failure here is never worth reporting. */
+function refreshOwnCache() {
+  if (!navigator.onLine) return;
+  fetch("sync.html", { cache: "reload" }).catch(() => {});
+  fetch("ring-engine.js", { cache: "reload" }).catch(() => {});
+}
+
+function showOnline() {
+  $("online").textContent = navigator.onLine ? "online" : "offline";
+  $("online").className = navigator.onLine ? "ok" : "warn";
+}
+addEventListener("online", () => { showOnline(); refreshOwnCache(); });
+addEventListener("offline", showOnline);
+showOnline();
+refreshOwnCache();
+renderQueue();
+setTimeout(selfCheck, 1200);
+
+/* URL modes, so one page serves every automation:
+     ?auto=1    full sync -- ~40s, needs Bluetooth and the ring nearby
+     ?drain=1   upload the queue only -- ~1s, no Bluetooth at all
+   Draining is split out because flushing a backlog has nothing to do with the
+   ring: forcing it through a full sync would spend 40s and a BLE connection to
+   do an HTTP POST. */
+/* Always try to flush on load when the Mac is reachable. The queue exists
+   because the Mac is often asleep; the moment it is not, there is no reason to
+   wait for an explicit action. */
+addEventListener("load", async () => {
+  if (MODE.get("auto") === "1") { log("auto mode: full sync"); sync(true); return; }
+
+  const pending = await idbAll();
+  if (!pending.length) {
+    if (MODE.get("drain") === "1") {
+      setState("Nothing queued", "no captures waiting", "");
+      log("drain mode: queue already empty");
+    }
+    return;
+  }
+  if (!navigator.onLine) {
+    setState("Offline", `${pending.length} capture(s) waiting`, "warn");
+    return;
+  }
+  setState("Uploading…", `${pending.length} queued`, "");
+  const sent = await drain();
+  const left = (await idbAll()).length;
+  setState(left ? "Partly uploaded" : "Up to date",
+           left ? `${left} still queued — Mac unreachable?` : `${sent} uploaded`,
+           left ? "warn" : "ok");
+});
+if ("serviceWorker" in navigator) {
+  addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+}
+</script>
+
+<script type="module">
+/* =============================================================================
+   THE LOCAL VIEW -- readiness computed on the phone, with the Mac asleep.
+
+   Decodes the newest capture straight out of IndexedDB and scores it with
+   ring-engine.js against params.json. Nothing here talks to the Mac.
+
+   This is a DISPLAY path. The raw bytes are still uploaded and re-decoded by
+   Python, which stays authoritative; if the two ever disagree the Mac wins and
+   the bytes are still on disk. tools/verify.sh holds the two engines to the
+   same 39 assertions so that disagreement stays theoretical.
+   ========================================================================== */
+import {
+  hexToBytes, splitMessages, decodeBattery, decodeSleep, decodeLog,
+  decodeHeartRateLog, decodeSportDetail, decodeSpo2, decodeTemperature,
+  readiness, mean, cleanSeries,
+} from "./ring-engine.js";
+import { encodeHandoff, HANDOFF_VERSION } from "./handoff.js";
+
+const PARAMS_KEY = "ring-params-v1";
+const el = (id) => document.getElementById(id);
+
+/* params.json is tiny (~1KB) and changes rarely, so it is mirrored into
+   localStorage. Service workers do not register in Bluefy, so this is the only
+   thing that makes scoring work with the Mac unreachable. */
+async function getParams() {
+  try {
+    const res = await fetch("params.json", { cache: "no-store" });
+    if (!res.ok) throw new Error(String(res.status));
+    const p = await res.json();
+    try { localStorage.setItem(PARAMS_KEY, JSON.stringify(p)); } catch { /* full */ }
+    return p;
+  } catch {
+    const cached = localStorage.getItem(PARAMS_KEY);
+    return cached ? JSON.parse(cached) : null;
+  }
+}
+
+function idbLatest() {
+  return new Promise((resolve) => {
+    const r = indexedDB.open("ring", 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains("captures"))
+        r.result.createObjectStore("captures", { keyPath: "id" });
+    };
+    r.onerror = () => resolve(null);
+    r.onsuccess = () => {
+      const q = r.result.transaction("captures").objectStore("captures").getAll();
+      q.onerror = () => resolve(null);
+      q.onsuccess = () => {
+        const all = q.result || [];
+        all.sort((a, b) => (a.captured_at || 0) - (b.captured_at || 0));
+        resolve(all.length ? all[all.length - 1] : null);
+      };
+    };
+  });
+}
+
+const stepsOf = (cap, kind) => (cap.steps || []).filter((s) => s.kind === kind);
+const chunksOf = (cap, kind) =>
+  stepsOf(cap, kind).flatMap((s) => s.chunks || []);
+
+/** Turn one capture into the handful of numbers the score needs. */
+function summarise(cap) {
+  const out = { battery: null, hr: null, restingHr: null, steps: null,
+                night: null, hrv: null, stress: null };
+
+  const bat = decodeBattery(chunksOf(cap, "battery"));
+  if (bat) out.battery = bat;
+
+  const hrLog = decodeHeartRateLog(chunksOf(cap, "hr"));
+  if (hrLog && hrLog.samples.length) {
+    out.hr = hrLog.samples[hrLog.samples.length - 1];
+    // Lowest reading of the day is the standard resting-HR proxy, matching
+    // score.py's MIN(reading) rather than inventing a second definition.
+    out.restingHr = Math.min(...hrLog.samples.map((s) => s.bpm));
+  }
+
+  const sd = decodeSportDetail(chunksOf(cap, "steps"));
+  if (sd.length) {
+    const today = new Date();
+    const mine = sd.filter((r) => r.day === today.getDate() &&
+                                  r.month === today.getMonth() + 1);
+    const rows = mine.length ? mine : sd;
+    out.steps = rows.reduce((a, r) => a + r.steps, 0);
+  }
+
+  const sleepBytes = hexToBytes(chunksOf(cap, "sleep").join(""));
+  const nights = splitMessages(sleepBytes).flatMap(decodeSleep)
+    .filter((n) => n.checksum_ok);        // never trust a record that fails its own check
+  if (nights.length) {
+    nights.sort((a, b) => a.days_ago - b.days_ago);
+    out.night = nights[0];
+  }
+
+  const hrv = decodeLog(57, chunksOf(cap, "hrv"));
+  if (hrv) out.hrv = mean(hrv.values);
+  const stress = decodeLog(55, chunksOf(cap, "stress"));
+  if (stress) out.stress = mean(stress.values);
+
+  return out;
+}
+
+const hm = (m) => `${Math.floor(m / 60)}h ${String(Math.round(m % 60)).padStart(2, "0")}m`;
+const band = (s) => s == null ? ["var(--ink-3)", "No data"]
+  : s >= 70 ? ["var(--good)", "Good"]
+  : s >= 40 ? ["var(--warning)", "Fair"] : ["var(--critical)", "Needs recovery"];
+
+function row(label, value, note) {
+  return `<div class="row"><b>${label}</b><span>${value}` +
+         (note ? ` <span class="muted">${note}</span>` : "") + `</span></div>`;
+}
+
+const LOCAL_KEY = "ring-local-v1";
+
+/** Last decoded summary, kept so the card survives its capture being uploaded. */
+function saveLocal(summary, capturedAt) {
+  try {
+    localStorage.setItem(LOCAL_KEY, JSON.stringify({
+      at: capturedAt,
+      // Dates do not survive JSON; store the instant and rebuild on the way out.
+      s: { ...summary, hr: summary.hr ? { ...summary.hr, at: +summary.hr.at } : null },
+    }));
+  } catch { /* quota */ }
+}
+function loadLocal() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null");
+    if (!raw) return null;
+    if (raw.s.hr) raw.s.hr = { ...raw.s.hr, at: new Date(raw.s.hr.at) };
+    return raw;
+  } catch { return null; }
+}
+
+const HANDOFF_KEY = "ring-handoff-v1";
+const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4)
+  .toISOString().slice(0, 16);
+const dayISO = (d) => iso(d).slice(0, 10);
+const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
+
+/** Daily aggregate in the shape the dashboard's `series` already uses. */
+function agg(day, values) {
+  const v = values.filter((x) => x != null);
+  if (!v.length) return null;
+  return { day, mean: +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2),
+           min: Math.min(...v), max: Math.max(...v), n: v.length };
+}
+
+/**
+ * Everything in one capture, decoded, in the dashboard's own vocabulary.
+ *
+ * DECODED, never raw hex: the capture is tens of KB of notification bytes and
+ * the dashboard cannot read those, while the decoded form is ~1KB gzipped and
+ * is exactly what it renders. The raw bytes still go to the Mac by the normal
+ * upload path, so this stays a display shortcut and never a second source of
+ * truth.
+ */
+function buildHandoff(cap, params) {
+  const today = new Date();
+  const out = { v: HANDOFF_VERSION, at: cap.captured_at,
+                params_at: params ? params.generated_at : null,
+                nights: [], segments: [], hr: [], steps: [],
+                series: {}, series_detail: {}, battery: null, readiness: null };
+
+  const bat = decodeBattery(chunksOf(cap, "battery"));
+  if (bat) out.battery = bat;
+
+  // --- sleep: every night the capture carried, not just the newest
+  const nights = splitMessages(hexToBytes(chunksOf(cap, "sleep").join("")))
+    .flatMap(decodeSleep).filter((n) => n.checksum_ok);
+  for (const n of nights) {
+    // night_of is the morning you woke (days_ago counts back from it); a night
+    // that WRAPPED past midnight began the previous evening. Mirrors
+    // colmi_bigdata.parse_sleep exactly.
+    const nightOf = addDays(today, -n.days_ago);
+    const startDay = n.wrapped ? addDays(nightOf, -1) : nightOf;
+    const onset = new Date(dayISO(startDay) + "T00:00");
+    onset.setMinutes(onset.getMinutes() + n.start);
+    out.nights.push({
+      night_of: dayISO(nightOf), onset: iso(onset),
+      in_bed_min: n.in_bed_min, asleep_min: n.asleep_min,
+      light_min: n.stages.light || 0, deep_min: n.stages.deep || 0,
+      rem_min: n.stages.REM || 0, awake_min: n.stages.awake || 0,
+      efficiency: n.efficiency == null ? null : +n.efficiency.toFixed(2),
+    });
+    if (n.days_ago === 0) {
+      // Segment start times are not in the decode -- they are the running sum
+      // from onset, which is how Python builds them too.
+      let cur = new Date(onset);
+      for (const sg of n.segments) {
+        out.segments.push({ night_of: dayISO(nightOf), start_ts: iso(cur),
+                            stage: sg.stage, minutes: sg.minutes });
+        cur = new Date(cur.getTime() + sg.minutes * 6e4);
+      }
+    }
+  }
+  out.nights.sort((a, b) => a.night_of < b.night_of ? 1 : -1);
+
+  // --- heart rate
+  const hrLog = decodeHeartRateLog(chunksOf(cap, "hr"));
+  if (hrLog) {
+    for (const p of hrLog.samples) {
+      if (p.bpm > 0) out.hr.push({ t: iso(p.at), v: p.bpm, i: false });
+    }
+  }
+
+  // --- steps, summed per day the way load.py does
+  const byDay = {};
+  for (const r of decodeSportDetail(chunksOf(cap, "steps"))) {
+    const d = `${r.year}-${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}`;
+    const b = byDay[d] || (byDay[d] = { day: d, steps: 0, calories_raw: 0,
+                                        distance_raw: 0, hours: 0, partial: true });
+    b.steps += r.steps; b.calories_raw += r.calories; b.distance_raw += r.distance;
+    b.hours += 0.25;
+  }
+  out.steps = Object.values(byDay).sort((a, b) => a.day < b.day ? -1 : 1);
+
+  // --- the 30-minute series. Cleaned with the SAME filters Python applies, so
+  // an impossible sample does not reach the dashboard by this route when it
+  // would have been rejected by the other.
+  const putSeries = (kind, day, values, interval) => {
+    const a = agg(day, values);
+    if (!a) return;
+    (out.series[kind] = out.series[kind] || []).push(a);
+    const det = (out.series_detail[kind] = out.series_detail[kind] || []);
+    values.forEach((v, i) => {
+      if (v != null) det.push({ day, minute: i * interval, value: v });
+    });
+  };
+  for (const [kind, cmd, clean] of [["hrv", 57, "hrv"], ["stress", 55, "stress"]]) {
+    for (const st of stepsOf(cap, kind)) {
+      const log = decodeLog(cmd, st.chunks || []);
+      if (!log) continue;
+      putSeries(kind, dayISO(addDays(today, -log.day_offset)),
+                cleanSeries(log.values, clean), log.interval || 30);
+    }
+  }
+  for (const r of decodeSpo2(chunksOf(cap, "spo2"))) {
+    putSeries("spo2", dayISO(addDays(today, -r.days_ago)),
+              cleanSeries(r.values, "spo2"), r.interval);
+  }
+  for (const r of decodeTemperature(chunksOf(cap, "temp"))) {
+    putSeries("temp_raw", dayISO(addDays(today, -r.days_ago)), r.values, r.interval);
+  }
+
+  // --- the score, computed here because only here are params and data together
+  if (params) {
+    const n0 = out.nights[0];
+    const hrToday = out.hr.map((p) => p.v);
+    out.readiness = readiness({
+      asleep_min: n0 ? n0.asleep_min : null,
+      efficiency: n0 ? n0.efficiency : null,
+      resting_hr: hrToday.length ? Math.min(...hrToday) : null,
+      hrv: out.series.hrv && out.series.hrv.length ? out.series.hrv[0].mean : null,
+      stress: out.series.stress && out.series.stress.length ? out.series.stress[0].mean : null,
+    }, params);
+  }
+  return out;
+}
+
+/** Where the dashboard lives, with the payload in the FRAGMENT -- fragments are
+    never sent to a server and never reach a log. */
+const dashUrl = (encoded) =>
+  location.href.replace(/[^/]*(\?.*)?(#.*)?$/, "") + "index.html#h=" + encoded;
+
+async function prepareHandoff(cap, params) {
+  const encoded = await encodeHandoff(buildHandoff(cap, params));
+  try { localStorage.setItem(HANDOFF_KEY, encoded); } catch { /* quota */ }
+  const btn = el("toDash");
+  btn.hidden = false;
+  btn.textContent = `Update dashboard (${(encoded.length / 1024).toFixed(1)} KB)`;
+  btn.onclick = () => openDashboard(encoded);
+  return encoded;
+}
+
+/** Hand off to Safari, where the dashboard's service worker cache lives.
+    Bluefy may refuse the x-safari- scheme; the button is the fallback and the
+    reason both paths exist. */
+function openDashboard(encoded) {
+  const url = dashUrl(encoded);
+  log(`handing ${(encoded.length / 1024).toFixed(1)} KB to the dashboard`, "ok");
+  try {
+    location.href = url.replace(/^https:/, "x-safari-https:")
+                       .replace(/^http:/, "x-safari-http:");
+    // If the scheme was refused nothing happens at all -- no error, no
+    // navigation -- so fall back in-place rather than leaving a dead button.
+    setTimeout(() => { location.href = url; }, 1200);
+  } catch {
+    location.href = url;
+  }
+}
+
+async function renderLocal(passed) {
+  /* Params FIRST, and unconditionally.
+     This used to sit below the early return, so it only ran when a capture was
+     present -- and a capture is DELETED the moment it uploads. The result was
+     that the one blob the phone needs to score without the Mac was fetched only
+     in the window between capturing and uploading, and after a clean sync the
+     phone was left with params:none. It reported exactly that in the 2026-08-25
+     log and I read it as a Bluefy limitation rather than our own ordering bug. */
+  const params = await getParams();
+
+  let cap = passed;
+  if (!cap) { try { cap = await idbLatest(); } catch { cap = null; } }
+
+  let s, capturedAt;
+  if (cap) {
+    s = summarise(cap);
+    capturedAt = cap.captured_at;
+    saveLocal(s, capturedAt);
+    // Prepared eagerly so the button is armed the moment a sync finishes,
+    // including when the Mac is unreachable -- which is the whole point.
+    prepareHandoff(cap, params).catch((e) => log(`handoff prep failed: ${e.message}`, "warn"));
+  } else {
+    // Nothing in the queue: fall back to the last summary we decoded. An empty
+    // queue means the sync WORKED, so showing nothing is the wrong answer.
+    const cached = loadLocal();
+    if (!cached) return;
+    s = cached.s;
+    capturedAt = cached.at;
+  }
+
+  let head = "";
+  if (params) {
+    const r = readiness({
+      asleep_min: s.night ? s.night.asleep_min : null,
+      efficiency: s.night ? s.night.efficiency : null,
+      resting_hr: s.restingHr,
+      hrv: s.hrv, stress: s.stress,
+    }, params);
+    const [colour, word] = band(r.score);
+    head = `<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:10px">
+      <b class="tnum" style="font-size:34px;font-weight:640;letter-spacing:-.03em;color:${colour}">
+        ${r.score == null ? "—" : Math.round(r.score)}</b>
+      <span style="font-size:14px;color:${colour}">${word}</span>
+      <span class="muted" style="margin-left:auto;font-size:12px">
+        ${Math.round(r.confidence * 100)}% confidence</span></div>`;
+  } else {
+    head = `<p class="muted" style="margin:0 0 10px">No scoring params yet —
+            open this once while the Mac is reachable.</p>`;
+  }
+
+  const rows = [];
+  if (s.hr) rows.push(row("Heart rate", `${s.hr.bpm} bpm`,
+    s.hr.at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })));
+  if (s.restingHr != null) rows.push(row("Resting HR", `${s.restingHr} bpm`, "day's low"));
+  if (s.night) rows.push(row("Slept", hm(s.night.asleep_min),
+    `${Math.round(s.night.efficiency)}% efficiency`));
+  if (s.steps != null) rows.push(row("Steps", s.steps.toLocaleString()));
+  if (s.hrv != null) rows.push(row("HRV", `${s.hrv.toFixed(1)} ms`));
+  if (s.stress != null) rows.push(row("Stress", Math.round(s.stress)));
+  if (s.battery) rows.push(row("Battery", `${s.battery.level}%`,
+    s.battery.charging ? "charging" : ""));
+
+  el("localBody").innerHTML = head + `<div class="rows">${rows.join("")}</div>` +
+    `<p class="muted" style="margin:10px 0 0;font-size:11.5px">
+       Computed on this phone from the last capture. Your Mac re-decodes the
+       same bytes and stays the source of truth.</p>`;
+  el("localWhen").textContent = new Date(capturedAt).toLocaleTimeString(
+    undefined, { hour: "numeric", minute: "2-digit" });
+  el("localCard").hidden = false;
+}
+
+/* A silent failure here is invisible: the card simply stays hidden and looks
+   like "no data yet". Surface it in the same log everything else uses. */
+async function safeRender(why, passed) {
+  try {
+    await renderLocal(passed);
+  } catch (e) {
+    const box = el("localBody");
+    if (box) {
+      box.innerHTML = `<p class="err" style="margin:0">Local view failed: ${e.message}</p>`;
+      el("localCard").hidden = false;
+    }
+    if (typeof log === "function") log(`local view failed (${why}): ${e.message}`, "err");
+    else console.error("[ring] local view failed", e);
+  }
+}
+
+addEventListener("ring:capture", (e) => safeRender("capture", e.detail));
+safeRender("load");
+</script>
+</body>
+</html>
