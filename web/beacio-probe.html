@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Ring · beacio probe</title>
+<style>
+  :root {
+    --plane:#08090b; --surface:#111419; --raise:#1e232b; --hairline:#222831;
+    --ink:#f7f8fa; --ink-2:#aab2be; --ink-3:#69717e;
+    --brand:#3987e5; --good:#0ca30c; --critical:#e66767; --warning:#fab219;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; padding:18px 15px calc(18px + env(safe-area-inset-bottom));
+    background:var(--plane); color:var(--ink);
+    font:15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1 { font-size:22px; font-weight:660; letter-spacing:-.02em; margin:0 0 2px; }
+  .sub { color:var(--ink-3); font-size:12.5px; margin:0 0 16px; }
+  .card {
+    background:var(--surface); border:1px solid var(--hairline); border-radius:14px;
+    padding:15px; margin-bottom:12px;
+  }
+  h2 {
+    font-size:11px; font-weight:660; text-transform:uppercase; letter-spacing:.11em;
+    color:var(--ink-3); margin:0 0 10px;
+  }
+  button {
+    -webkit-appearance:none; appearance:none; width:100%; min-height:46px;
+    border-radius:11px; border:1px solid var(--hairline); background:var(--raise);
+    color:var(--ink); font:inherit; font-weight:560; margin-bottom:8px;
+  }
+  button.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+  button:disabled { opacity:.4; }
+  button:active { transform:scale(.985); }
+  .row { display:flex; gap:8px; }
+  .row button { margin-bottom:0; }
+  #log {
+    font:11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space:pre-wrap; word-break:break-word;
+    max-height:44vh; overflow-y:auto; margin:0;
+    -webkit-user-select:text; user-select:text;
+  }
+  .ok   { color:var(--good); }
+  .err  { color:var(--critical); }
+  .warn { color:var(--warning); }
+  .dim  { color:var(--ink-3); }
+  .b    { color:var(--brand); }
+  .banner {
+    border-left:3px solid var(--warning); padding:8px 0 8px 11px;
+    font-size:12.5px; color:var(--ink-2); margin:0 0 12px;
+  }
+</style>
+</head>
+<body>
+
+<h1>beacio probe</h1>
+<p class="sub">Does Web Bluetooth work in real Safari via the beacio polyfill? <b id="ver" style="color:var(--brand)">build 1</b></p>
+
+<div id="setup" class="banner">
+  Requires the free <b>beacio</b> app (App Store) installed, then enabled at
+  Settings → Apps → Safari → Extensions → beacio. This page must be opened in
+  Safari itself, not Bluefy — that's the entire point of the test.
+</div>
+
+<div id="unsupported" class="banner" hidden></div>
+
+<div class="card">
+  <h2>1 · Connect</h2>
+  <button id="pick" class="primary">Pick ring (filtered)</button>
+  <button id="pickAll">Pick from all devices</button>
+  <p class="sub" style="margin:6px 0 0">
+    Use the first button and look for <b style="color:var(--ink-2)">COLMI R02_C302</b>.
+    It can take ~10s to appear — the chooser fills in as devices advertise, so
+    don't give up on an empty list. The second button lists every nearby
+    device, most of them unnamed, and is only a fallback.
+  </p>
+</div>
+
+<div class="card">
+  <h2>2 · Probe</h2>
+  <button id="enumerate" disabled>List services &amp; characteristics</button>
+  <div class="row" style="margin-bottom:8px">
+    <button id="battery" disabled>Battery (UART)</button>
+    <button id="bigdata" disabled>Sleep (big data)</button>
+  </div>
+  <button id="disconnect" disabled>Disconnect</button>
+  <p class="sub" style="margin:6px 0 0">
+    The thing actually being tested here: can the polyfill reach the
+    <b style="color:var(--ink-2)">de5bf728…</b> big-data v2 service at all, and
+    does it survive the ring's real connect time (14–26s observed via Bleak on
+    the Mac, 6.6s–15s+ observed via Bluefy)? A polyfill bridging through a
+    Safari extension process is a longer round-trip than either of those.
+  </p>
+</div>
+
+<div class="card">
+  <h2>3 · Can this be automated?</h2>
+  <button id="autotest">Test auto-reconnect (no tap needed)</button>
+  <p class="sub" style="margin:6px 0 0">
+    <code>requestDevice()</code> always needs a tap — that's the spec. But
+    <code>getDevices()</code> doesn't. If it works here, a Shortcut could open
+    the dashboard on a schedule and it would sync with no interaction — same
+    question as the Bluefy probe asked, but now the answer would apply to the
+    SAME page as the dashboard, since Safari has both Web Bluetooth (via the
+    polyfill) and a working service worker.
+  </p>
+</div>
+
+<div class="card">
+  <h2>Log</h2>
+  <div class="row" style="margin-bottom:10px">
+    <button id="send" class="primary">Send to Mac</button>
+    <button id="copy">Copy</button>
+  </div>
+  <pre id="log" class="dim">Waiting.</pre>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ constants
+   Identical wire protocol to bluefy-probe.html -- the polyfill's whole job is
+   to make navigator.bluetooth behave the same regardless of what's underneath
+   it, so this file is deliberately the same test against a different host. */
+const UART_SVC = "6e40fff0-b5a3-f393-e0a9-e50e24dcca9e";
+const UART_RX  = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";  // write
+const UART_TX  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";  // notify
+
+const V2_SVC    = "de5bf728-d711-4e47-af26-65e3012a5dc7";
+const V2_CMD    = "de5bf72a-d711-4e47-af26-65e3012a5dc7";  // write
+const V2_NOTIFY = "de5bf729-d711-4e47-af26-65e3012a5dc7";  // notify
+
+const CMD_BATTERY = 3;
+const BIG_DATA_CMD = 0xbc, TYPE_SLEEP = 0x27;
+
+/* ---------------------------------------------------------------------- utils */
+const logEl = document.getElementById("log");
+let first = true;
+function log(msg, cls) {
+  if (first) { logEl.textContent = ""; first = false; }
+  const line = document.createElement("span");
+  if (cls) line.className = cls;
+  const t = new Date().toLocaleTimeString(undefined, { hour12:false });
+  line.textContent = `${t}  ${msg}\n`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+const hex = (dv) => [...new Uint8Array(dv.buffer ?? dv)]
+  .map(b => b.toString(16).padStart(2, "0")).join(" ");
+
+function makePacket(command, sub = []) {
+  const p = new Uint8Array(16);
+  p[0] = command;
+  sub.forEach((b, i) => { p[i + 1] = b; });
+  p[15] = p.reduce((a, b) => a + b, 0) & 0xff;
+  return p;
+}
+const bigDataRequest = (kind) =>
+  new Uint8Array([BIG_DATA_CMD, kind, 0x01, 0x00, 0xff, 0x00, 0xff]);
+
+/* ---------------------------------------------------------------------- state */
+let device = null, server = null;
+const chars = {};
+const btn = (id) => document.getElementById(id);
+function setConnected(on) {
+  ["enumerate", "battery", "bigdata", "disconnect"].forEach(id => btn(id).disabled = !on);
+}
+
+(function checkSupport() {
+  const standalone = window.navigator.standalone === true ||
+    matchMedia("(display-mode: standalone)").matches;
+  log(`display mode: ${standalone ? "STANDALONE (launched from home screen icon)" : "browser tab"}`,
+      standalone ? "warn" : "dim");
+  const el = document.getElementById("unsupported");
+  if (!window.isSecureContext) {
+    el.hidden = false;
+    el.innerHTML = "<b>Not a secure context.</b> Web Bluetooth needs HTTPS. " +
+      "Open this through your Tailscale <code>serve</code> HTTPS URL, not a raw IP or file://.";
+  } else if (!navigator.bluetooth) {
+    el.hidden = false;
+    el.innerHTML = "<b>navigator.bluetooth is undefined.</b> Either beacio isn't " +
+      "installed/enabled (Settings → Apps → Safari → Extensions → beacio, then " +
+      "reload this page), or the polyfill doesn't inject on this page for some " +
+      "other reason worth logging.";
+  } else {
+    log("navigator.bluetooth is present — polyfill is injecting.", "ok");
+  }
+})();
+
+btn("autotest").onclick = async () => {
+  if (!navigator.bluetooth) { log("no Web Bluetooth at all", "err"); return; }
+  if (typeof navigator.bluetooth.getDevices !== "function") {
+    log("getDevices() NOT supported by the polyfill", "err");
+    log("=> scheduled auto-sync would still need a tap through beacio.", "warn");
+    return;
+  }
+  try {
+    const devs = await navigator.bluetooth.getDevices();
+    log(`getDevices() supported — ${devs.length} remembered device(s)`, "ok");
+    devs.forEach(d => log(`   ${d.name || "(unnamed)"}  id=${d.id}`, "dim"));
+    if (devs.length) {
+      log("=> AUTO-SYNC IS POSSIBLE from inside the dashboard itself, no", "ok");
+      log("   handoff, no separate Bluefy app needed.", "ok");
+    } else {
+      log("supported, but nothing remembered yet — connect once, then retest.", "warn");
+    }
+  } catch (e) {
+    log(`getDevices() failed: ${e.name}: ${e.message}`, "err");
+  }
+};
+
+const logText = () => logEl.innerText;
+
+btn("copy").onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(logText());
+    log("log copied to clipboard", "ok");
+  } catch {
+    const r = document.createRange();
+    r.selectNodeContents(logEl);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    log("couldn't auto-copy — log is selected, use the popup", "warn");
+  }
+};
+
+btn("send").onclick = async () => {
+  log("sending to Mac…", "dim");
+  try {
+    const res = await fetch("/probe-log", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: logText(),
+    });
+    log(res.ok ? `sent to Mac ✓ (HTTP ${res.status})` : `send failed: HTTP ${res.status}`,
+        res.ok ? "ok" : "err");
+  } catch (e) {
+    log(`send failed: ${e.name}: ${e.message}`, "err");
+    log("(the Mac serves this page, so it must still be running)", "dim");
+  }
+};
+
+/* Same lesson as the Bluefy probe: do not race gatt.connect() against a
+   timeout, or a slow-but-successful connect gets reported as a failure while
+   the radio link is left up with nothing tracking it. */
+const BEAT_MS = 5000;
+
+async function connect(opts) {
+  try {
+    log("requesting device…");
+    device = await navigator.bluetooth.requestDevice(opts);
+    log(`selected: ${device.name || "(unnamed)"}  id=${device.id}`, "ok");
+    device.addEventListener("gattserverdisconnected", () => {
+      log("disconnected", "warn"); setConnected(false);
+    });
+
+    log("connecting to GATT… (can take 30s+, leave this open)");
+    btn("disconnect").disabled = false;
+
+    const t0 = Date.now();
+    let done = false;
+    const beat = setInterval(() => {
+      if (done) return clearInterval(beat);
+      const secs = Math.round((Date.now() - t0) / 1000);
+      log(`still connecting… ${secs}s`, "dim");
+      if (secs >= 45) {
+        log("unusually slow — if it never lands, Forget This Device in " +
+            "iPhone Settings > Bluetooth, then reload.", "warn");
+      }
+    }, BEAT_MS);
+
+    try {
+      server = await device.gatt.connect();
+    } finally {
+      done = true; clearInterval(beat);
+    }
+
+    log(`GATT connected in ${((Date.now() - t0) / 1000).toFixed(1)}s`, "ok");
+    setConnected(true);
+
+    try {
+      const svcs = await server.getPrimaryServices();
+      log(`${svcs.length} service(s) visible`, "ok");
+    } catch (e) {
+      log(`connected, but discovery failed: ${e.message}`, "warn");
+    }
+    log("tap the probe buttons now — the ring drops idle links after ~30s", "b");
+  } catch (e) {
+    log(`connect failed: ${e.name || "Error"}: ${e.message}`, "err");
+    if (/cancel/i.test(String(e))) {
+      log("(the chooser was dismissed — nothing was selected)", "dim");
+    } else {
+      log("If the ring shows as connected on the phone anyway, iOS is holding", "dim");
+      log("it: Settings > Bluetooth > COLMI > Forget This Device, then reload.", "dim");
+    }
+    setConnected(false);
+  }
+}
+
+btn("pick").onclick = () => connect({
+  filters: [{ namePrefix: "COLMI" }, { namePrefix: "R02" }],
+  optionalServices: [UART_SVC, V2_SVC],
+});
+btn("pickAll").onclick = () => connect({
+  acceptAllDevices: true,
+  optionalServices: [UART_SVC, V2_SVC],
+});
+
+btn("disconnect").onclick = () => {
+  if (device?.gatt.connected) device.gatt.disconnect();
+  setConnected(false);
+};
+
+btn("enumerate").onclick = async () => {
+  try {
+    const services = await server.getPrimaryServices();
+    log(`${services.length} primary service(s):`, "b");
+    for (const s of services) {
+      log(`  ${s.uuid}`);
+      let cs = [];
+      try { cs = await s.getCharacteristics(); }
+      catch (e) { log(`    (characteristics unavailable: ${e.message})`, "warn"); }
+      for (const c of cs) {
+        const p = c.properties;
+        const flags = ["read","write","writeWithoutResponse","notify","indicate"]
+          .filter(k => p[k]).join(",");
+        log(`    ${c.uuid}  [${flags}]`, "dim");
+      }
+    }
+    log("enumeration done", "ok");
+  } catch (e) {
+    log(`enumerate failed: ${e.name}: ${e.message}`, "err");
+    log("If services are missing, they were not in optionalServices at request time.", "dim");
+  }
+};
+
+async function subscribe(svcUuid, charUuid, label) {
+  const key = `${svcUuid}|${charUuid}`;
+  if (chars[key]) return chars[key];
+  const svc = await server.getPrimaryService(svcUuid);
+  const ch = await svc.getCharacteristic(charUuid);
+  await ch.startNotifications();
+  ch.addEventListener("characteristicvaluechanged", (ev) => {
+    log(`${label} <- ${hex(ev.target.value)}`, "b");
+  });
+  chars[key] = ch;
+  log(`subscribed to ${label}`, "ok");
+  return ch;
+}
+
+async function writeTo(svcUuid, charUuid, bytes) {
+  const svc = await server.getPrimaryService(svcUuid);
+  const ch = await svc.getCharacteristic(charUuid);
+  if (ch.properties.writeWithoutResponse && ch.writeValueWithoutResponse) {
+    await ch.writeValueWithoutResponse(bytes);
+  } else if (ch.writeValueWithResponse) {
+    await ch.writeValueWithResponse(bytes);
+  } else {
+    await ch.writeValue(bytes);
+  }
+}
+
+btn("battery").onclick = async () => {
+  try {
+    await subscribe(UART_SVC, UART_TX, "UART");
+    const pkt = makePacket(CMD_BATTERY);
+    log(`UART -> ${hex(pkt)}`);
+    await writeTo(UART_SVC, UART_RX, pkt);
+    log("battery request sent — expect a reply starting 03", "dim");
+  } catch (e) {
+    log(`battery probe failed: ${e.name}: ${e.message}`, "err");
+  }
+};
+
+btn("bigdata").onclick = async () => {
+  try {
+    await subscribe(V2_SVC, V2_NOTIFY, "V2");
+    const pkt = bigDataRequest(TYPE_SLEEP);
+    log(`V2 -> ${hex(pkt)}`);
+    await writeTo(V2_SVC, V2_CMD, pkt);
+    log("sleep request sent — expect bc 27 … possibly over several chunks", "dim");
+  } catch (e) {
+    log(`big-data probe failed: ${e.name}: ${e.message}`, "err");
+  }
+};
+</script>
+</body>
+</html>
