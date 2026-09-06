@@ -1,13 +1,14 @@
 /* Prove the JS engine matches Python on real data. Run: node tools/verify_engine.mjs */
 import { readFileSync } from "fs";
+import { join } from "node:path";
+
+const fixtureDir = process.env.RING_VERIFY_DIR;
+if (!fixtureDir) throw new Error("Run tools/verify.sh to generate isolated fixtures first");
+const fixture = (name) => JSON.parse(readFileSync(join(fixtureDir, name)));
 import { readiness, decodeSleep, splitMessages, decodeBattery, hexToBytes,
          decodeHeartRateLog, decodeSportDetail, decodeSpo2, decodeTemperature,
          clipImpossible, hampel } from "../web/ring-engine.js";
 import { encodeHandoff, decodeHandoff, HANDOFF_VERSION } from "../web/handoff.js";
-
-const params = JSON.parse(readFileSync(new URL("../web/dist/params.json", import.meta.url)));
-const inputs = JSON.parse(readFileSync("/tmp/engine_inputs.json"));
-const expected = JSON.parse(readFileSync("/tmp/python_readiness.json"));
 
 let fail = 0;
 const check = (label, got, want, tol = 0.05) => {
@@ -16,15 +17,17 @@ const check = (label, got, want, tol = 0.05) => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${label.padEnd(26)} js=${got} py=${want}`);
 };
 
-console.log("SCORING (JS vs Python, identical inputs)");
-const r = readiness(inputs, params);
-check("readiness score", r.score == null ? null : +r.score.toFixed(4),
-      expected.score == null ? null : +expected.score.toFixed(4));
-check("confidence", +r.confidence.toFixed(4), +expected.confidence.toFixed(4));
-for (const c of r.components) {
-  const py = expected.components.find((x) => x.name === c.name);
-  check(`  ${c.name}`, c.score == null ? null : +c.score.toFixed(4),
-        py.score == null ? null : +py.score.toFixed(4));
+console.log("SCORING (JS vs Python, deterministic inputs)");
+for (const { name, inputs, params, expected } of fixture("scoring_cases.json")) {
+  console.log(`  ${name}`);
+  const r = readiness(inputs, params);
+  check("readiness score", r.score, expected.score);
+  check("confidence", r.confidence, expected.confidence);
+  for (const c of r.components) {
+    const py = expected.components.find((x) => x.name === c.name);
+    check(`  ${c.name}`, c.score, py.score);
+    check(`  ${c.name} available`, Number(c.available), Number(py.available), 0);
+  }
 }
 
 console.log("\nDECODING (phone's real captured bytes)");
@@ -32,7 +35,7 @@ const sleepHex = readFileSync(
   new URL("./fixtures/sleep_wrapped.hex", import.meta.url), "utf8").trim();
 const msgs = splitMessages(hexToBytes(sleepHex));
 const nights = msgs.flatMap(decodeSleep);
-const py = JSON.parse(readFileSync("/tmp/python_sleep.json"));
+const py = fixture("python_sleep.json");
 check("nights decoded", nights.length, py.length, 0);
 nights.forEach((n, i) => {
   check(`  night ${i} in_bed`, n.in_bed_min, py[i].in_bed_min, 0);
@@ -47,8 +50,8 @@ const bat = decodeBattery(["0347000000000000000000000000004a"]);
 check("battery level", bat.level, 71, 0);
 
 console.log("\nHR + STEPS (synthetic packets, both parsers)");
-const synth = JSON.parse(readFileSync("/tmp/synth_packets.json"));
-const pyHS = JSON.parse(readFileSync("/tmp/python_hr_steps.json"));
+const synth = fixture("synth_packets.json");
+const pyHS = fixture("python_hr_steps.json");
 
 const hrLog = decodeHeartRateLog(synth.hr);
 check("hr samples", hrLog ? hrLog.samples.length : null, pyHS.hr_count, 0);
@@ -94,10 +97,10 @@ const eqList = (label, got, want) => {
 };
 eqList("spo2",
   decodeSpo2([readFileSync(new URL("./fixtures/spo2.hex", import.meta.url), "utf8").trim()]),
-  JSON.parse(readFileSync("/tmp/python_spo2.json")));
+  fixture("python_spo2.json"));
 eqList("temp",
   decodeTemperature([readFileSync(new URL("./fixtures/temp.hex", import.meta.url), "utf8").trim()]),
-  JSON.parse(readFileSync("/tmp/python_temp.json")));
+  fixture("python_temp.json"));
 
 /* --------------------------------------------------------------------------
    CLEANING. The filter resting HR is most exposed to: it is a MINIMUM, so one
@@ -108,7 +111,7 @@ eqList("temp",
    -------------------------------------------------------------------------- */
 console.log("\nCLEANING (clip + hampel vs pandas)");
 const noisy = JSON.parse(readFileSync(new URL("./fixtures/hr_noisy.json", import.meta.url)));
-const pyClean = JSON.parse(readFileSync("/tmp/python_clean.json"));
+const pyClean = fixture("python_clean.json");
 const jsClipped = clipImpossible(noisy, "bpm");
 const jsCleaned = hampel(jsClipped);
 const countDiff = (a, b) => a.reduce((n, v, i) => n + ((v ?? null) === (b[i] ?? null) ? 0 : 1), 0);
