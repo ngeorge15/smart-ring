@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DATA } from "@/lib/data";
+import { fetchJson } from "@/lib/http";
 import { KnownLimits, Section } from "@/components/Charts";
 import { Card } from "@/components/ui/card";
+import { SyncCard } from "@/components/SyncCard";
 
 /** Plain-words age. "12 min ago" beats a timestamp you have to subtract. */
 function ago(iso: string | null | undefined) {
@@ -48,22 +50,21 @@ function useMacReachable() {
   useEffect(() => {
     let cancelled = false;
     const check = async () => {
-      const ctrl = new AbortController();
-      // The tailnet is fast when it works; a long hang means unreachable.
-      const timer = setTimeout(() => ctrl.abort(), 4000);
       try {
         // Unique URL per attempt: `cache: no-store` governs the HTTP cache but
         // NOT a service worker, which happily replayed a cached 200 and made
         // this report "reachable" with the network switched off.
-        const res = await fetch(`ping?t=${Date.now()}`,
-                                { cache: "no-store", signal: ctrl.signal });
-        if (!res.ok) throw new Error(String(res.status));
+        // Require the ping contract too: Vite's HTML fallback is also a 200,
+        // but parsing it as JSON (or a payload without `now`) must fail closed.
+        const payload = await fetchJson<{ now?: unknown }>(
+          `ping?t=${Date.now()}`, { cache: "no-store" });
+        if (typeof payload.now !== "string") throw new Error("Invalid ping response");
         const now = new Date().toISOString();
         try { localStorage.setItem(REACHED_KEY, now); } catch { /* private mode */ }
         if (!cancelled) setState({ ok: true, last: now });
       } catch {
         if (!cancelled) setState((s) => ({ ok: false, last: s.last }));
-      } finally { clearTimeout(timer); }
+      }
     };
     check();
     const id = setInterval(check, 30000);
@@ -109,6 +110,8 @@ export function RingPage() {
 
   return (
     <>
+      <SyncCard />
+
       <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
         <div className="flex items-baseline justify-between">
           <h2 className="text-[11px] font-[660] uppercase tracking-[0.11em] text-ink-3">
@@ -142,7 +145,8 @@ export function RingPage() {
         {curve.length >= 2 ? (
           <div className="mt-3 h-[96px] w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={curve} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+              <AreaChart data={curve} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
+                         accessibilityLayer={false}>
                 <defs>
                   <linearGradient id="battfill" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="var(--brand)" stopOpacity={0.35} />

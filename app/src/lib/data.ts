@@ -56,13 +56,15 @@ export type BaselineT = {
 
 export type Snapshot = {
   meta: { generated_at: string; ring: string; note: string;
+          /** Exact captures committed by the authoritative importer. */
+          capture_ack_ids?: string[]; capture_ack_at?: string | null;
           span: { first: string | null; last: string | null; days: number; hr_samples: number } };
   readiness: { day: string; is_today: boolean; score: number | null; confidence: number;
                components: Component[]; caveats: string[]; headroom: Headroom };
   sleep: { nights: Night[]; latest_night: string | null; latest_segments: Segment[] };
   sleep_debt: SleepDebtT;
   trends: TrendsT;
-  hr: { points: HrPoint[]; coverage: number; n_outliers: number };
+  hr: { points: HrPoint[]; coverage: number | null; n_outliers: number | null };
   series: Record<string, SeriesRow[]>;
   series_detail: Record<string, { day: string; minute: number; value: number }[]>;
   steps: { day: string; steps: number; hours: number; partial: boolean;

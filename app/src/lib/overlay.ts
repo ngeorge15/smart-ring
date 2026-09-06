@@ -10,14 +10,16 @@ import { DATA, type Snapshot } from "@/lib/data";
  * lets everything downstream carry on as if the Mac had built it.
  *
  * The Mac stays authoritative. The same raw bytes upload by the normal path,
- * and the moment `meta.generated_at` passes the overlay's timestamp the overlay
- * is dropped, because by then the Mac has re-decoded the same night with full
- * history, cleaning and calibration behind it.
+ * and the overlay is dropped only when snapshot metadata acknowledges that
+ * exact capture ID. A newer build can be unrelated or can race the decoder.
  */
 const KEY = "ring-overlay-v1";
 
 export type Overlay = {
   v: number; at: number; params_at: string | null;
+  /** Optional only so already-stored v2 overlays remain readable. Legacy
+      overlays cannot be retired without an exact acknowledgement. */
+  capture_id?: string; capture_day?: string;
   readiness: { score: number | null; confidence: number;
                components: { name: string; value: number | null; score: number | null;
                              weight: number; confidence: number; explain: string;
@@ -38,12 +40,68 @@ const read = (): Overlay | null => {
   try { return JSON.parse(localStorage.getItem(KEY) || "null"); } catch { return null; }
 };
 
+/**
+ * Apply a just-decoded capture directly, no fragment/codec round-trip needed.
+ *
+ * The hash-based path below exists because Bluefy and Safari cannot share
+ * storage — the payload has to travel through a URL, so it has to be encoded.
+ * A capture decoded by the dashboard's OWN capture engine (lib/capture.ts +
+ * lib/summarise.ts) is already in this process; writing it to the same
+ * localStorage key `read()` already consumes is the entire integration.
+ * Reloading re-enters the normal boot path in main.tsx, which applies it
+ * exactly as a Bluefy handoff would have.
+ */
+export function saveOverlayAndReload(ov: Overlay): void {
+  try { localStorage.setItem(KEY, JSON.stringify(ov)); } catch { /* quota */ }
+  location.reload();
+}
+
 /** Newest-wins merge on a day-like key, keeping the cached history intact. */
 function mergeBy<T>(base: T[], add: T[], key: (x: T) => string, desc = false): T[] {
   const m = new Map(base.map((x) => [key(x), x]));
   for (const x of add) m.set(key(x), x);          // the phone's day replaces the Mac's
   const out = [...m.values()].sort((a, b) => key(a) < key(b) ? -1 : 1);
   return desc ? out.reverse() : out;
+}
+
+function componentDisplay(name: string, value: number | null): string {
+  if (value == null) return "";
+  if (name === "sleep_duration") {
+    const mins = Math.round(value);
+    return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, "0")}m`;
+  }
+  if (name === "sleep_quality") return `${Math.round(value)}%`;
+  if (name === "resting_hr") return `${Math.round(value)} bpm`;
+  if (name === "hrv") return `${Math.round(value)} ms`;
+  return String(Math.round(value));
+}
+
+function overlaySleepDebt(nights: Snapshot["sleep"]["nights"], captureDay: string) {
+  const base = DATA.sleep_debt;
+  const byDay = new Map(base.nights.map((n) => [n.night, n]));
+  for (const n of nights) {
+    byDay.set(n.night_of, { night: n.night_of, asleep_min: n.asleep_min,
+      delta: n.asleep_min - base.target_min, cumulative: 0, source: "ring" });
+  }
+  const end = new Date(`${captureDay}T00:00:00Z`);
+  const rows: Snapshot["sleep_debt"]["nights"] = [];
+  let running = 0;
+  for (let i = base.window - 1; i >= 0; i--) {
+    const d = new Date(end);
+    d.setUTCDate(d.getUTCDate() - i);
+    const day = d.toISOString().slice(0, 10);
+    const existing = byDay.get(day);
+    const asleep = existing?.asleep_min ?? null;
+    const delta = asleep == null ? null : asleep - base.target_min;
+    if (delta != null) running = Math.max(0, running - delta);
+    rows.push({ night: day, asleep_min: asleep, delta,
+      cumulative: Math.round(running), source: existing?.source ?? null });
+  }
+  const sources = [...new Set(rows.flatMap((n) => n.source ? [n.source] : []))].sort();
+  return { ...base, nights: rows, debt_min: Math.round(running),
+    covered: rows.filter((n) => n.asleep_min != null).length,
+    missing: rows.filter((n) => n.asleep_min == null).length,
+    sources, mixed_sources: sources.length > 1 };
 }
 
 /* A fragment-only navigation does NOT reload the page.
@@ -77,29 +135,54 @@ export async function initOverlay(): Promise<void> {
   if (!ov) ov = read();
   if (!ov || !ov.at) return;
 
-  // The Mac has caught up: its build is newer than this capture, and it decoded
-  // the same bytes with the full history behind it. Drop the overlay entirely.
-  const built = Date.parse(DATA.meta.generated_at);
-  if (Number.isFinite(built) && built >= ov.at) {
+  // Build timestamps prove only that a build happened. An unrelated rebuild or
+  // a rebuild racing the async decoder must not discard fresh phone readings.
+  if (ov.capture_id && DATA.meta.capture_ack_ids?.includes(ov.capture_id)) {
     try { localStorage.removeItem(KEY); } catch { /* ignore */ }
     return;
+  }
+  if (!ov.capture_id) {
+    // Legacy v2 overlays predate capture IDs, so no future snapshot can ever
+    // acknowledge them exactly. Keep them only while they are demonstrably
+    // newer than the baked snapshot; otherwise they would override that day
+    // forever. New overlays never use this timestamp fallback.
+    const built = Date.parse(DATA.meta.generated_at);
+    if (!Number.isFinite(built) || built >= ov.at) {
+      try { localStorage.removeItem(KEY); } catch { /* ignore */ }
+      return;
+    }
   }
 
   const merged: Partial<Snapshot> = {};
 
   if (ov.nights?.length) {
     const nights = mergeBy(DATA.sleep.nights, ov.nights, (n) => n.night_of, true);
+    const days = new Set(ov.nights.map((n) => n.night_of));
     merged.sleep = {
       nights,
       latest_night: nights.length ? nights[0].night_of : DATA.sleep.latest_night,
-      latest_segments: ov.segments?.length ? ov.segments : DATA.sleep.latest_segments,
+      latest_segments: [
+        ...DATA.sleep.latest_segments.filter((s) => !days.has(s.night_of)),
+        ...(ov.segments ?? []),
+      ].sort((a, b) => a.start_ts.localeCompare(b.start_ts)),
     };
+    if (ov.capture_day) merged.sleep_debt = overlaySleepDebt(ov.nights, ov.capture_day);
   }
   if (ov.hr?.length) {
-    merged.hr = { ...DATA.hr, points: mergeBy(DATA.hr.points, ov.hr, (p) => p.t) };
+    merged.hr = { points: mergeBy(DATA.hr.points, ov.hr, (p) => p.t),
+      // Coverage/outliers require the Mac's complete window and cleaning pass.
+      // null suppresses the old snapshot's unrelated derived values.
+      coverage: null, n_outliers: null };
   }
   if (ov.steps?.length) {
     merged.steps = mergeBy(DATA.steps, ov.steps, (s) => s.day);
+    const days = new Set(ov.steps.map((s) => s.day));
+    // These are computed on the Mac from inputs the local capture does not
+    // carry. Remove the superseded day rather than pairing old derivatives
+    // with new totals.
+    merged.activity_hourly = DATA.activity_hourly.filter((r) => !days.has(r.day));
+    merged.energy = { ...DATA.energy,
+      days: DATA.energy.days.filter((r) => !days.has(r.day)) };
   }
   if (ov.series) {
     const series = { ...DATA.series };
@@ -121,24 +204,26 @@ export async function initOverlay(): Promise<void> {
   if (ov.battery) {
     merged.device = { ...DATA.device, battery: ov.battery.level,
                       charging: ov.battery.charging,
-                      battery_at: new Date(ov.at).toISOString().slice(0, 19),
+                      battery_at: new Date(ov.at).toISOString(),
                       latest_reading: ov.hr?.length ? ov.hr[ov.hr.length - 1].t
                                                     : DATA.device.latest_reading };
   }
-  if (ov.readiness && ov.readiness.score != null) {
+  if (ov.readiness) {
+    const now = new Date();
+    const currentDay = new Date(now.getTime() - now.getTimezoneOffset() * 6e4)
+      .toISOString().slice(0, 10);
     merged.readiness = {
       ...DATA.readiness,
-      score: Math.round(ov.readiness.score * 10) / 10,
+      day: ov.capture_day ?? DATA.readiness.day,
+      is_today: ov.capture_day
+        ? ov.capture_day === currentDay
+        : DATA.readiness.is_today,
+      score: ov.readiness.score == null ? null : Math.round(ov.readiness.score * 10) / 10,
       confidence: ov.readiness.confidence,
-      components: ov.readiness.components.map((c) => {
-        const prev = DATA.readiness.components.find((x) => x.name === c.name);
-        return { ...(prev ?? {}), ...c,
-                 // Presentation strings are built by score.py and the phone does
-                 // not reproduce them. `explain` is the one line both engines
-                 // produce, so it stands in rather than showing the Mac's
-                 // sentence about a different night.
-                 display: prev?.display ?? "", delta: "", headline: c.explain };
-      }) as Snapshot["readiness"]["components"],
+      components: ov.readiness.components.map((c) => ({ ...c,
+        display: componentDisplay(c.name, c.value), delta: "", headline: c.explain,
+      })) as Snapshot["readiness"]["components"],
+      caveats: [],
       // headroom is a Python computation over full baselines; it cannot be
       // recomputed here, and pairing the Mac's breakdown with the phone's score
       // would describe a gap that does not match the number above it.

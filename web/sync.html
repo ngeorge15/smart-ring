@@ -101,6 +101,8 @@
 
 const $ = (id) => document.getElementById(id);
 const PLAN_KEY = "ring-plan-v1";
+const IMPORT_JOBS_KEY = "ring-import-jobs-v1";
+const INGEST_TIMEOUT_MS = 15000;
 /* Declared HERE, before any consumer. It used to live further down, and the
    foreground-sync code above it hit the temporal dead zone -- the whole script
    died with "Cannot access 'MODE' before initialization". */
@@ -122,6 +124,20 @@ function setState(s, d, cls) {
 const hex = (dv) => [...new Uint8Array(dv.buffer ?? dv)]
   .map(b => b.toString(16).padStart(2, "0")).join("");
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function stableCaptureId(capture) {
+  const payload = JSON.stringify(capture);
+  if (crypto.subtle) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+    return `cap_${hex(digest).slice(0, 32)}`;
+  }
+  let h = 2166136261;
+  for (let i = 0; i < payload.length; i++) {
+    h ^= payload.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `cap_${(h >>> 0).toString(16).padStart(8, "0")}`;
+}
 
 /* Bluefy rejects gatt.connect() with a value that is NOT an Error -- reading
    .name/.message off it produced "undefined: undefined" and cost a round trip.
@@ -337,6 +353,34 @@ async function runStep(server, step, cache) {
 /* Captures that could not reach IndexedDB. Lost on reload -- which is why they
    are uploaded at the first opportunity rather than left to a later drain. */
 const memoryQueue = [];
+const IMPORT_STATES = new Set(["queued", "running", "completed", "failed"]);
+
+function importJobs() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(IMPORT_JOBS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  }
+  catch { return []; }
+}
+function rememberImportJob(job) {
+  try {
+    const jobs = importJobs().filter((j) => j.capture_id !== job.capture_id);
+    localStorage.setItem(IMPORT_JOBS_KEY, JSON.stringify([...jobs, job].slice(-20)));
+  } catch { /* private mode/full storage */ }
+}
+
+async function acceptedJob(res, cap) {
+  let ack = null;
+  try { ack = await res.json(); } catch {}
+  if (res.status !== 202 || ack?.accepted !== true ||
+      !IMPORT_STATES.has(ack.state) || ack.capture_id !== cap.id ||
+      typeof ack.job_id !== "string" ||
+      typeof ack.status_url !== "string" ||
+      typeof ack.retry_url !== "string") {
+    throw new Error(`invalid queue acknowledgement (HTTP ${res.status})`);
+  }
+  return ack;
+}
 
 async function drain() {
   let stored = [];
@@ -345,26 +389,30 @@ async function drain() {
   }
   const all = [...stored, ...memoryQueue];
   if (!all.length) { log("queue empty"); return 0; }
-  let sent = 0;
+  let accepted = 0;
   for (const cap of all) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), INGEST_TIMEOUT_MS);
     try {
       const res = await fetch("/ingest", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(cap),
+        body: JSON.stringify(cap), signal: controller.signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      rememberImportJob(await acceptedJob(res, cap));
       try { await idbDel(cap.id); } catch { /* never stored; nothing to delete */ }
       const m = memoryQueue.indexOf(cap);
       if (m >= 0) memoryQueue.splice(m, 1);
-      sent++;
-      log(`uploaded ${cap.id}`, "ok");
+      accepted++;
+      log(`queued for import ${cap.id}`, "ok");
     } catch (e) {
-      log(`upload failed (${e.message}) — kept in queue`, "warn");
+      log(`upload failed (${describeErr(e)}) — kept in queue`, "warn");
       break;                       // Mac is down; stop trying, keep the rest
+    } finally {
+      clearTimeout(timeout);
     }
   }
   try { await renderQueue(); } catch { /* cosmetic */ }
-  return sent;
+  return accepted;
 }
 
 /** Best-effort log upload. Never throws -- diagnostics must not break the page. */
@@ -448,13 +496,20 @@ async function sync(auto) {
                    day_offset: step.day_offset, chunks });
     }
 
-    const capture = {
-      id: new Date().toISOString(),
-      captured_at: Date.now(),
+    const capturedAt = Date.now();
+    let capturedTimezone;
+    try { capturedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined; }
+    catch { /* fixed offset below is sufficient */ }
+    const captureDraft = {
+      captured_at: capturedAt,
+      captured_timezone: capturedTimezone,
+      // Minutes EAST of UTC, the inverse sign of getTimezoneOffset().
+      captured_utc_offset_min: -new Date(capturedAt).getTimezoneOffset(),
       source: auto ? "auto" : "manual",
       plan_version: plan.version,
       steps,
     };
+    const capture = { id: await stableCaptureId(captureDraft), ...captureDraft };
     /* Persist BEFORE uploading: a sync with the Mac asleep is still a success.
 
        But a store failure must NOT destroy a sync that already succeeded. On
@@ -482,17 +537,7 @@ async function sync(auto) {
 
     const got = steps.filter(s => s.chunks.length).length;
     if (got) markSynced();
-    const sent = await drain();
-
-    /* The dashboard is a baked snapshot, so uploading is not enough -- the Mac
-       has to regenerate it before the new readings are visible. Done here so
-       the caller lands on a page that already reflects this sync. */
-    if (sent) {
-      try {
-        setState("Rebuilding…", "asking the Mac to refresh the dashboard", "");
-        await fetch("/rebuild", { method: "POST" });
-      } catch { log("rebuild request failed — data is stored either way", "warn"); }
-    }
+    const accepted = await drain();
     const back = MODE.get("return");
     if (back) {
       // Only relative paths: a `return` value is attacker-controllable in a URL
@@ -501,8 +546,8 @@ async function sync(auto) {
       log(`returning to ${safe}`, "ok");
       setTimeout(() => { location.href = safe; }, 600);
     }
-    setState(sent ? "Synced" : "Saved locally",
-             `${got}/${steps.length} replies · ${sent ? "uploaded" : "queued for the Mac"}`,
+    setState(accepted ? "Captured" : "Saved locally",
+             `${got}/${steps.length} replies · ${accepted ? "queued for import" : "waiting for the Mac"}`,
              "ok");
   } catch (e) {
     log(`sync failed: ${describeErr(e)}`, "err");
@@ -700,10 +745,10 @@ addEventListener("load", async () => {
     return;
   }
   setState("Uploading…", `${pending.length} queued`, "");
-  const sent = await drain();
+  const accepted = await drain();
   const left = (await idbAll()).length;
-  setState(left ? "Partly uploaded" : "Up to date",
-           left ? `${left} still queued — Mac unreachable?` : `${sent} uploaded`,
+  setState(left ? "Partly queued" : "Queued for import",
+           left ? `${left} still on this phone — Mac unreachable?` : `${accepted} accepted by Mac`,
            left ? "warn" : "ok");
 });
 if ("serviceWorker" in navigator) {
@@ -777,6 +822,7 @@ const chunksOf = (cap, kind) =>
 function summarise(cap) {
   const out = { battery: null, hr: null, restingHr: null, steps: null,
                 night: null, hrv: null, stress: null };
+  const captureDay = captureDayISO(cap);
 
   const bat = decodeBattery(chunksOf(cap, "battery"));
   if (bat) out.battery = bat;
@@ -786,14 +832,14 @@ function summarise(cap) {
     out.hr = hrLog.samples[hrLog.samples.length - 1];
     // Lowest reading of the day is the standard resting-HR proxy, matching
     // score.py's MIN(reading) rather than inventing a second definition.
-    out.restingHr = Math.min(...hrLog.samples.map((s) => s.bpm));
+    const today = hrLog.samples.filter((s) => iso(s.at).slice(0, 10) === captureDay);
+    if (today.length) out.restingHr = Math.min(...today.map((s) => s.bpm));
   }
 
   const sd = decodeSportDetail(chunksOf(cap, "steps"));
   if (sd.length) {
-    const today = new Date();
-    const mine = sd.filter((r) => r.day === today.getDate() &&
-                                  r.month === today.getMonth() + 1);
+    const mine = sd.filter((r) =>
+      `${r.year}-${String(r.month).padStart(2, "0")}-${String(r.day).padStart(2, "0")}` === captureDay);
     const rows = mine.length ? mine : sd;
     out.steps = rows.reduce((a, r) => a + r.steps, 0);
   }
@@ -803,13 +849,23 @@ function summarise(cap) {
     .filter((n) => n.checksum_ok);        // never trust a record that fails its own check
   if (nights.length) {
     nights.sort((a, b) => a.days_ago - b.days_ago);
-    out.night = nights[0];
+    out.night = nights.find((n) => addDays(captureDay, -n.days_ago) === captureDay) || null;
   }
 
-  const hrv = decodeLog(57, chunksOf(cap, "hrv"));
-  if (hrv) out.hrv = mean(hrv.values);
-  const stress = decodeLog(55, chunksOf(cap, "stress"));
-  if (stress) out.stress = mean(stress.values);
+  for (const st of stepsOf(cap, "hrv")) {
+    const hrv = decodeLog(57, st.chunks || []);
+    if (hrv && addDays(captureDay, -hrv.day_offset) === captureDay) {
+      out.hrv = mean(cleanSeries(hrv.values, "hrv"));
+      break;
+    }
+  }
+  for (const st of stepsOf(cap, "stress")) {
+    const stress = decodeLog(55, st.chunks || []);
+    if (stress && addDays(captureDay, -stress.day_offset) === captureDay) {
+      out.stress = mean(cleanSeries(stress.values, "stress"));
+      break;
+    }
+  }
 
   return out;
 }
@@ -848,8 +904,35 @@ function loadLocal() {
 const HANDOFF_KEY = "ring-handoff-v1";
 const iso = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 6e4)
   .toISOString().slice(0, 16);
-const dayISO = (d) => iso(d).slice(0, 10);
-const addDays = (d, n) => new Date(d.getTime() + n * 864e5);
+function captureDayISO(cap) {
+  const at = new Date(cap.captured_at);
+  if (!Number.isFinite(at.getTime())) throw new Error("invalid capture timestamp");
+  if (cap.captured_timezone) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: cap.captured_timezone, year: "numeric", month: "2-digit", day: "2-digit",
+      }).formatToParts(at);
+      const get = (kind) => parts.find((p) => p.type === kind)?.value;
+      const y = get("year"), m = get("month"), d = get("day");
+      if (y && m && d) return `${y}-${m}-${d}`;
+    } catch { /* old/invalid zone: use captured fixed offset */ }
+  }
+  if (Number.isFinite(cap.captured_utc_offset_min)) {
+    return new Date(cap.captured_at + cap.captured_utc_offset_min * 6e4)
+      .toISOString().slice(0, 10);
+  }
+  return iso(at).slice(0, 10); // legacy queued capture
+}
+const addDays = (day, n) => {
+  const d = new Date(`${day}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const minuteISO = (day, minute) => {
+  const date = addDays(day, Math.floor(minute / 1440));
+  const m = ((minute % 1440) + 1440) % 1440;
+  return `${date}T${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+};
 
 /** Daily aggregate in the shape the dashboard's `series` already uses. */
 function agg(day, values) {
@@ -857,6 +940,12 @@ function agg(day, values) {
   if (!v.length) return null;
   return { day, mean: +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(2),
            min: Math.min(...v), max: Math.max(...v), n: v.length };
+}
+
+function seriesMeanForDay(out, kind, day) {
+  const rows = out.series[kind] || [];
+  const row = rows.find((r) => r.day === day);
+  return row ? row.mean : null;
 }
 
 /**
@@ -869,8 +958,9 @@ function agg(day, values) {
  * truth.
  */
 function buildHandoff(cap, params) {
-  const today = new Date();
+  const captureDay = captureDayISO(cap);
   const out = { v: HANDOFF_VERSION, at: cap.captured_at,
+                capture_id: cap.id, capture_day: captureDay,
                 params_at: params ? params.generated_at : null,
                 nights: [], segments: [], hr: [], steps: [],
                 series: {}, series_detail: {}, battery: null, readiness: null };
@@ -880,30 +970,29 @@ function buildHandoff(cap, params) {
 
   // --- sleep: every night the capture carried, not just the newest
   const nights = splitMessages(hexToBytes(chunksOf(cap, "sleep").join("")))
-    .flatMap(decodeSleep).filter((n) => n.checksum_ok);
+    .flatMap(decodeSleep).filter((n) => n.checksum_ok && n.efficiency != null);
   for (const n of nights) {
     // night_of is the morning you woke (days_ago counts back from it); a night
     // that WRAPPED past midnight began the previous evening. Mirrors
     // colmi_bigdata.parse_sleep exactly.
-    const nightOf = addDays(today, -n.days_ago);
+    const nightOf = addDays(captureDay, -n.days_ago);
     const startDay = n.wrapped ? addDays(nightOf, -1) : nightOf;
-    const onset = new Date(dayISO(startDay) + "T00:00");
-    onset.setMinutes(onset.getMinutes() + n.start);
+    const onset = minuteISO(startDay, n.start);
     out.nights.push({
-      night_of: dayISO(nightOf), onset: iso(onset),
+      night_of: nightOf, onset,
       in_bed_min: n.in_bed_min, asleep_min: n.asleep_min,
       light_min: n.stages.light || 0, deep_min: n.stages.deep || 0,
       rem_min: n.stages.REM || 0, awake_min: n.stages.awake || 0,
-      efficiency: n.efficiency == null ? null : +n.efficiency.toFixed(2),
+      efficiency: +n.efficiency.toFixed(2),
     });
     if (n.days_ago === 0) {
       // Segment start times are not in the decode -- they are the running sum
       // from onset, which is how Python builds them too.
-      let cur = new Date(onset);
+      let minute = n.start;
       for (const sg of n.segments) {
-        out.segments.push({ night_of: dayISO(nightOf), start_ts: iso(cur),
+        out.segments.push({ night_of: nightOf, start_ts: minuteISO(startDay, minute),
                             stage: sg.stage, minutes: sg.minutes });
-        cur = new Date(cur.getTime() + sg.minutes * 6e4);
+        minute += sg.minutes;
       }
     }
   }
@@ -944,28 +1033,28 @@ function buildHandoff(cap, params) {
     for (const st of stepsOf(cap, kind)) {
       const log = decodeLog(cmd, st.chunks || []);
       if (!log) continue;
-      putSeries(kind, dayISO(addDays(today, -log.day_offset)),
+      putSeries(kind, addDays(captureDay, -log.day_offset),
                 cleanSeries(log.values, clean), log.interval || 30);
     }
   }
   for (const r of decodeSpo2(chunksOf(cap, "spo2"))) {
-    putSeries("spo2", dayISO(addDays(today, -r.days_ago)),
+    putSeries("spo2", addDays(captureDay, -r.days_ago),
               cleanSeries(r.values, "spo2"), r.interval);
   }
   for (const r of decodeTemperature(chunksOf(cap, "temp"))) {
-    putSeries("temp_raw", dayISO(addDays(today, -r.days_ago)), r.values, r.interval);
+    putSeries("temp_raw", addDays(captureDay, -r.days_ago), r.values, r.interval);
   }
 
   // --- the score, computed here because only here are params and data together
   if (params) {
-    const n0 = out.nights[0];
-    const hrToday = out.hr.map((p) => p.v);
+    const n0 = out.nights.find((n) => n.night_of === captureDay);
+    const hrToday = out.hr.filter((p) => p.t.slice(0, 10) === captureDay).map((p) => p.v);
     out.readiness = readiness({
       asleep_min: n0 ? n0.asleep_min : null,
       efficiency: n0 ? n0.efficiency : null,
       resting_hr: hrToday.length ? Math.min(...hrToday) : null,
-      hrv: out.series.hrv && out.series.hrv.length ? out.series.hrv[0].mean : null,
-      stress: out.series.stress && out.series.stress.length ? out.series.stress[0].mean : null,
+      hrv: seriesMeanForDay(out, "hrv", captureDay),
+      stress: seriesMeanForDay(out, "stress", captureDay),
     }, params);
   }
   return out;

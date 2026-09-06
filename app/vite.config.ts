@@ -13,6 +13,16 @@ export default defineConfig({
     // consumer drift on the wire format, which is the one thing that must not
     // happen across two apps that cannot see each other's storage.
     "@handoff": new URL("../web/handoff.js", import.meta.url).pathname,
+    // Same reasoning as @handoff: sync.html's fallback path and the dashboard's
+    // own capture engine must decode with the exact same code, or the two can
+    // silently disagree on a byte layout.
+    "@ring-engine": new URL("../web/ring-engine.js", import.meta.url).pathname,
   } },
-  build: { outDir: "../web/dist", emptyOutDir: true, assetsInlineLimit: 100000000 },
+  build: {
+    // Production builds target a private staging directory and are swapped
+    // into place only after every generated support file is present.
+    outDir: process.env.RING_BUILD_OUT_DIR ?? "../web/dist",
+    emptyOutDir: true,
+    assetsInlineLimit: 100000000,
+  },
 });

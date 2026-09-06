@@ -8,24 +8,100 @@ AirDrops, and works with no network.
 from __future__ import annotations
 
 import json
+import fcntl
 import os
+import secrets
 import shutil
-from urllib.parse import quote
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import quote
 
 from ring_analysis import snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 APP = ROOT / "app"
-OUT = ROOT / "web" / "dist" / "index.html"
+WEB = ROOT / "web"
+DIST = WEB / "dist"
+BUILD_LOCK = WEB / ".build.lock"
+BUILD_MUTEX = WEB / ".build-serialize.lock"
+
+
+@contextmanager
+def _exclusive_build():
+    """Serialize expensive builders while the old build remains readable."""
+    WEB.mkdir(parents=True, exist_ok=True)
+    with BUILD_MUTEX.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _atomic_text(path: Path, value: str) -> None:
+    """Replace generated source files without exposing partial contents."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(value)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            Path(tmp_name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _publish_build(staged: Path, live: Path = DIST) -> None:
+    """Publish a complete directory, restoring the old build on swap failure."""
+    lock_path = live.parent / BUILD_LOCK.name
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        backup = live.with_name(f".{live.name}.previous-{secrets.token_hex(6)}")
+        had_live = live.exists()
+        if had_live:
+            os.replace(live, backup)
+        try:
+            os.replace(staged, live)
+        except BaseException:
+            if had_live:
+                os.replace(backup, live)
+            raise
+    if had_live:
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def main() -> None:
-    snap = snapshot.build()
-    payload = json.dumps(snap, indent=1, default=str)
-    (ROOT / "web" / "snapshot.json").write_text(payload)
-    (APP / "src" / "snapshot.json").write_text(payload)   # bundled at build time
+    with _exclusive_build():
+        _build_locked()
+
+
+def _build_locked() -> None:
+    # snapshot.build historically writes web/snapshot.json itself. Redirect
+    # that side effect into this build's private workspace so a failed Vite run
+    # cannot advertise data that the live page does not contain.
+    stage = Path(tempfile.mkdtemp(prefix=".dist-build-", dir=WEB))
+    snapshot_path = stage / "snapshot.json"
+    original_snapshot_out = snapshot.OUT
+    snapshot.OUT = snapshot_path
+    try:
+        snap = snapshot.build()
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    finally:
+        snapshot.OUT = original_snapshot_out
+    try:
+        payload = json.dumps(snap, indent=1, default=str)
+        _atomic_text(APP / "src" / "snapshot.json", payload)  # bundled at build time
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
 
     # A LaunchAgent does not inherit a login shell's PATH, so shutil.which("npm")
     # returned None when the server triggered a rebuild even though npm is
@@ -38,6 +114,7 @@ def main() -> None:
                 npm = cand
                 break
     if npm is None:
+        shutil.rmtree(stage, ignore_errors=True)
         raise RuntimeError("npm not found on PATH or in the usual locations")
     # npm shells out to node, so node must be on the PATH of the CHILD process --
     # finding npm itself is not enough. Under a LaunchAgent the inherited PATH is
@@ -45,17 +122,36 @@ def main() -> None:
     env = {**os.environ, "PATH": ":".join([
         str(Path(npm).parent), "/usr/local/bin", "/opt/homebrew/bin",
         os.environ.get("PATH", "/usr/bin:/bin"),
-    ])}
-    r = subprocess.run([npm, "run", "build"], cwd=APP, capture_output=True,
-                       text=True, env=env)
-    if r.returncode != 0:
-        raise RuntimeError(f"vite build failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    ]), "RING_BUILD_OUT_DIR": str(stage)}
+    try:
+        r = subprocess.run([npm, "run", "build"], cwd=APP, capture_output=True,
+                           text=True, env=env)
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"vite build failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
 
-    _emit_params()
-    _emit_pwa_files()
+        # Vite intentionally emptied only its private staging directory. Add
+        # the snapshot after that cleanup so it publishes beside this page.
+        _atomic_text(snapshot_path, payload)
+        out = stage / "index.html"
+        if not out.is_file() or out.stat().st_size == 0:
+            raise RuntimeError("vite build did not produce a non-empty index.html")
+        _emit_params(stage)
+        _emit_pwa_files(stage)
+        _publish_build(stage)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
 
-    kb = OUT.stat().st_size / 1024
-    print(f"built {OUT}  ({kb:.0f} KB, self-contained)")
+    # Retain the historical generated snapshot path for offline analysis. The
+    # server reads dist/snapshot.json, which was published with the page above.
+    try:
+        _atomic_text(WEB / "snapshot.json", payload)
+    except OSError as exc:
+        print(f"warning: legacy web/snapshot.json was not updated: {exc}")
+    out = DIST / "index.html"
+    kb = out.stat().st_size / 1024
+    print(f"built {out}  ({kb:.0f} KB, self-contained)")
     print(f"  readiness {snap['readiness']['score']} @ {snap['readiness']['confidence']:.0%} conf")
 
 
@@ -107,12 +203,23 @@ const good = r => r && r.status === 200 && r.type !== 'opaque';
 
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
-  // The Web Bluetooth probe is a debugging tool that changes constantly; a
+  const path = new URL(e.request.url).pathname;
+  // The Web Bluetooth probes are debugging tools that change constantly; a
   // cached copy makes it impossible to tell which build is running.
   if (e.request.url.includes('bluefy-probe')) return;
+  if (e.request.url.includes('beacio-probe')) return;
   // /ping answers "is the Mac reachable right now". A cached response makes it
   // answer "yes" while offline, which is worse than not asking at all.
-  if (e.request.url.includes('/ping')) return;
+  if (path === '/ping' || path === '/sync-plan' || path === '/ingest-status') return;
+
+  // A sleeping Mac can leave a TCP connection pending without rejecting it.
+  // Bound network-first so the cached app shell remains a dependable fallback.
+  const timedFetch = async req => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try { return await fetch(req, {signal: controller.signal}); }
+    finally { clearTimeout(timer); }
+  };
 
   e.respondWith((async () => {
     // A navigation must never end at a browser error page: falling back to the
@@ -120,7 +227,7 @@ self.addEventListener('fetch', e => {
     const shell = async () => (await caches.match('index.html'))
                            || (await caches.match('./'));
     try {
-      const r = await fetch(e.request);
+      const r = await timedFetch(e.request);
       if (good(r)) {
         const copy = r.clone();
         caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
@@ -158,7 +265,7 @@ REGISTER = ("<script>if('serviceWorker' in navigator){addEventListener('load',()
 ICON_DIR = ROOT / "web" / "icon"
 
 
-def _emit_params() -> None:
+def _emit_params(out_dir: Path = DIST) -> None:
     """The small blob the phone needs to score WITHOUT the Mac.
 
     Baselines reduce ~500K Apple Health records to about fifty numbers, so a
@@ -209,16 +316,16 @@ def _emit_params() -> None:
             "hrr_floor": HRR_FLOOR, "met_max": MET_MAX,
             "sample_minutes": SAMPLE_MINUTES, "blend": BLEND,
         }
-    (OUT.parent / "params.json").write_text(json.dumps(payload, indent=1))
+    (out_dir / "params.json").write_text(json.dumps(payload, indent=1))
 
 
-def _emit_pwa_files() -> None:
+def _emit_pwa_files(out_dir: Path = DIST) -> None:
     """Manifest + service worker, so the served copy installs and works offline.
 
     These only take effect over HTTPS (Tailscale serve). Opened from file:// the
     page is already fully local, so nothing is lost when they are inert.
     """
-    d = OUT.parent
+    d = out_dir
     (d / "manifest.json").write_text(MANIFEST)
     (d / "sw.js").write_text(SW)
 
@@ -228,7 +335,7 @@ def _emit_pwa_files() -> None:
     # handoff.js is loaded at RUNTIME by sync.html in Bluefy and is also
     # bundled into the dashboard through the @handoff alias -- one file, two
     # consumers, so the wire format cannot drift between the two apps.
-    for extra in ("bluefy-probe.html", "sync.html", "ring-engine.js", "handoff.js"):
+    for extra in ("bluefy-probe.html", "beacio-probe.html", "sync.html", "ring-engine.js", "handoff.js"):
         src = ROOT / "web" / extra
         if src.exists():
             shutil.copyfile(src, d / extra)
@@ -243,14 +350,15 @@ def _emit_pwa_files() -> None:
     svg = (ICON_DIR / "ring.svg").read_text()
     favicon = "data:image/svg+xml;utf8," + quote(svg, safe="")
 
-    html = OUT.read_text()
+    out = d / "index.html"
+    html = out.read_text()
     if "apple-touch-icon" not in html:
         head = (f'<link rel="icon" href="{favicon}">'
                 '<link rel="apple-touch-icon" href="icon-180.png">'
                 '<link rel="manifest" href="manifest.json">')
         html = html.replace("</head>", head + "</head>")
         html = html.replace("</body>", REGISTER + "</body>")
-        OUT.write_text(html)
+        out.write_text(html)
 
 
 if __name__ == "__main__":
