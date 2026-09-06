@@ -15,12 +15,14 @@ Run:  ingest.py <capture.json>          (needs the pipx venv interpreter)
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import sqlite3
 import subprocess
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -74,11 +76,76 @@ def _ts(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
 
+def _capture_datetime(capture: dict) -> datetime:
+    """Return the capture instant in the phone's timezone.
+
+    Relative day markers describe days before collection, not days before a
+    queued file eventually reaches the Mac. IANA timezone is preferred because
+    it applies the correct historical DST rule at the capture instant. The
+    fixed offset keeps captures usable on browsers that cannot supply a zone.
+    """
+    raw = capture.get("captured_at")
+    if isinstance(raw, bool):
+        raise ValueError("captured_at must be epoch milliseconds")
+    try:
+        epoch_ms = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("captured_at must be epoch milliseconds") from None
+    if not math.isfinite(epoch_ms) or epoch_ms <= 0:
+        raise ValueError("captured_at must be finite epoch milliseconds")
+
+    instant = datetime.fromtimestamp(epoch_ms / 1000, timezone.utc)
+    zone_name = capture.get("captured_timezone")
+    if isinstance(zone_name, str) and zone_name:
+        try:
+            return instant.astimezone(ZoneInfo(zone_name))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+
+    offset = capture.get("captured_utc_offset_min")
+    if isinstance(offset, (int, float)) and not isinstance(offset, bool):
+        if math.isfinite(float(offset)) and -24 * 60 < float(offset) < 24 * 60:
+            return instant.astimezone(timezone(timedelta(minutes=float(offset))))
+
+    # Backward compatibility for already-queued captures written before zone
+    # metadata existed. The Mac and ring historically shared local time.
+    return datetime.fromtimestamp(epoch_ms / 1000).astimezone()
+
+
 def _chunks(step: dict) -> list[bytes]:
-    return [bytes.fromhex(h) for h in step.get("chunks", []) if h]
+    raw = step.get("chunks", [])
+    if not isinstance(raw, list):
+        raise ValueError("chunks must be a list")
+    out = []
+    for h in raw:
+        if not isinstance(h, str) or not h:
+            raise ValueError("each chunk must be a nonempty hex string")
+        out.append(bytes.fromhex(h))
+    return out
 
 
-def _ring_and_sync(conn: sqlite3.Connection, comment: str) -> tuple[int, int]:
+def _bigdata_messages(step: dict) -> list[bytes]:
+    """Strictly split a complete big-data response, retaining empty payloads."""
+    blob = b"".join(_chunks(step))
+    messages: list[bytes] = []
+    off = 0
+    while off < len(blob):
+        if off + 6 > len(blob) or blob[off] != bd.BIG_DATA_CMD:
+            raise ValueError("malformed big-data framing")
+        declared = int.from_bytes(blob[off + 2:off + 4], "little")
+        end = off + 6 + declared
+        if end > len(blob):
+            raise ValueError(
+                f"truncated big-data message: expected {declared} payload bytes")
+        messages.append(blob[off + 6:end])
+        off = end
+    if not messages:
+        raise ValueError("empty big-data response")
+    return messages
+
+
+def _ring_and_sync(conn: sqlite3.Connection, comment: str,
+                   captured: datetime) -> tuple[int, int]:
     row = conn.execute("SELECT ring_id FROM rings WHERE address=?",
                        (RING_ADDRESS,)).fetchone()
     if row is None:
@@ -88,7 +155,7 @@ def _ring_and_sync(conn: sqlite3.Connection, comment: str) -> tuple[int, int]:
         ring_id = int(row[0])
     cur = conn.execute(
         "INSERT INTO syncs (comment, ring_id, timestamp) VALUES (?,?,?)",
-        (comment, ring_id, datetime.now().isoformat(sep=" ")))
+        (comment, ring_id, captured.replace(tzinfo=None).isoformat(sep=" ")))
     return ring_id, int(cur.lastrowid)
 
 
@@ -97,24 +164,30 @@ def _ring_and_sync(conn: sqlite3.Connection, comment: str) -> tuple[int, int]:
 def _do_battery(conn, step, ctx) -> int:
     for p in _chunks(step):
         if len(p) >= 3 and p[0] == 3:
-            store.save_battery(conn, int(p[1]), bool(p[2]))
+            store.save_battery(
+                conn, int(p[1]), bool(p[2]),
+                ts=ctx["captured"].replace(tzinfo=None).isoformat(timespec="seconds"),
+                commit=False,
+            )
             return 1
-    return 0
+    raise ValueError("battery response did not contain a complete reading")
 
 
 def _do_hr(conn, step, ctx) -> int:
     """Replay packets through the library's own state machine."""
-    from colmi_r02_client.hr import HeartRateLogParser, HeartRateLog
+    from colmi_r02_client.hr import HeartRateLogParser, HeartRateLog, NoData
 
     parser = HeartRateLogParser()
     log = None
     for p in _chunks(step):
         got = parser.parse(bytearray(p))
+        if isinstance(got, NoData):
+            return 0
         if isinstance(got, HeartRateLog):
             log = got
             break
     if log is None:
-        return 0
+        raise ValueError("incomplete heart-rate packet stream")
 
     ring_id, sync_id = ctx["ids"]
     n = 0
@@ -142,6 +215,9 @@ def _do_steps(conn, step, ctx) -> int:
             details = got
             break
 
+    if not details:
+        raise ValueError("incomplete steps packet stream")
+
     ring_id, sync_id = ctx["ids"]
     n = 0
     for d in details:
@@ -163,38 +239,49 @@ def _do_steps(conn, step, ctx) -> int:
 
 def _do_log(cmd: int, kind: str):
     def handler(conn, step, ctx) -> int:
-        series = ce.parse_log(cmd, _chunks(step))
+        packets = _chunks(step)
+        relevant = [p for p in packets if len(p) >= 2 and p[0] == cmd]
+        if any(p[1] == 255 for p in relevant):
+            return 0
+        by_index = {p[1]: p for p in relevant}
+        if 0 not in by_index or len(by_index[0]) < 4:
+            raise ValueError(f"missing {kind} header")
+        expected = int(by_index[0][2])
+        missing = [i for i in range(expected) if i not in by_index]
+        if missing:
+            raise ValueError(f"incomplete {kind} packet stream; missing {missing}")
+        series = ce.parse_log(cmd, packets)
         if not any(v for v in series.values):
             return 0
         # The ring echoes the requested offset back, so the day is read, never
         # assumed -- a request that silently returns a different day is caught.
-        day = (date.today() - timedelta(days=series.day_offset)).isoformat()
-        return store.save_series(conn, kind, day, series.interval_minutes, series.values)
+        day = (ctx["capture_day"] - timedelta(days=series.day_offset)).isoformat()
+        return store.save_series(
+            conn, kind, day, series.interval_minutes, series.values, commit=False)
     return handler
 
 
 def _do_sleep(conn, step, ctx) -> int:
-    blob = b"".join(_chunks(step))
     total = 0
-    for msg in bd.split_messages(blob):
-        nights = bd.parse_sleep(msg)
-        total += store.save_sleep(conn, nights)
+    for msg in _bigdata_messages(step):
+        nights = bd.parse_sleep(msg, today=ctx["capture_day"])
+        total += store.save_sleep(conn, nights, commit=False)
     return total
 
 
 def _do_series_bigdata(kind: str, parser):
     def handler(conn, step, ctx) -> int:
-        blob = b"".join(_chunks(step))
         n = 0
-        for msg in bd.split_messages(blob):
+        for msg in _bigdata_messages(step):
             for rec in parser(msg):
                 if kind == "temp_raw":
                     days_ago, interval, values = rec
                 else:
                     days_ago, values = rec
                     interval = 30
-                day = (date.today() - timedelta(days=days_ago)).isoformat()
-                n += store.save_series(conn, kind, day, interval, values)
+                day = (ctx["capture_day"] - timedelta(days=days_ago)).isoformat()
+                n += store.save_series(
+                    conn, kind, day, interval, values, commit=False)
         return n
     return handler
 
@@ -215,26 +302,77 @@ def ingest(capture: dict, db: Path = DB) -> dict:
     conn = store.connect(db)
     summary: dict[str, int] = {}
     errors: list[str] = []
-    ctx = {"ids": _ring_and_sync(conn, f"phone {capture.get('source', '?')}")}
+    capture_id = capture.get("id")
+    if not isinstance(capture_id, str) or not capture_id.strip():
+        conn.close()
+        return {"capture_id": None, "acknowledged": False, "stored": {},
+                "errors": ["capture: missing stable id"]}
+    capture_id = capture_id.strip()
 
-    for step in capture.get("steps", []):
-        kind = step.get("kind")
-        fn = HANDLERS.get(kind)
-        if fn is None:
-            errors.append(f"{step.get('id')}: no handler for kind {kind!r}")
-            continue
-        if not step.get("chunks"):
-            continue                      # nothing came back; not an error
-        try:
-            summary[kind] = summary.get(kind, 0) + fn(conn, step, ctx)
-        except Exception as e:            # one bad decode must not lose the rest
-            errors.append(f"{step.get('id')}: {type(e).__name__}: {e}")
+    try:
+        if store.capture_is_acknowledged(conn, capture_id):
+            return {"capture_id": capture_id, "acknowledged": True,
+                    "already_imported": True, "stored": {}, "errors": []}
 
-    summary["normalised_timestamps"] = store.normalise_timestamps(conn)
-    summary["dropped_future_rows"] = store.drop_future_rows(conn)
-    conn.commit()
-    conn.close()
-    return {"stored": summary, "errors": errors}
+        captured = _capture_datetime(capture)
+        ctx = {
+            "captured": captured,
+            "capture_day": captured.date(),
+            "ids": _ring_and_sync(
+                conn, f"phone {capture.get('source', '?')} capture={capture_id}", captured),
+        }
+
+        steps = capture.get("steps")
+        if not isinstance(steps, list):
+            errors.append("capture: steps must be a list")
+            steps = []
+        if not steps:
+            errors.append("capture: no steps to import")
+        saw_chunks = False
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                errors.append(f"step {index}: must be an object")
+                continue
+            if not isinstance(step.get("chunks", []), list):
+                errors.append(f"{step.get('id', index)}: chunks must be a list")
+                continue
+            kind = step.get("kind")
+            fn = HANDLERS.get(kind)
+            if fn is None:
+                errors.append(f"{step.get('id')}: no handler for kind {kind!r}")
+                continue
+            if not step.get("chunks"):
+                errors.append(f"{step.get('id')}: empty response chunks")
+                continue
+            saw_chunks = True
+            try:
+                summary[kind] = summary.get(kind, 0) + fn(conn, step, ctx)
+            except Exception as e:
+                errors.append(f"{step.get('id')}: {type(e).__name__}: {e}")
+
+        if not saw_chunks:
+            errors.append("capture: no response chunks to import")
+
+        if errors:
+            # Raw bytes remain in the durable spool. Keeping a partial database
+            # write would make a later retry depend on every handler's conflict
+            # semantics and could never justify acknowledging the whole capture.
+            conn.rollback()
+            return {"capture_id": capture_id, "acknowledged": False,
+                    "stored": {}, "errors": errors}
+
+        summary["normalised_timestamps"] = store.normalise_timestamps(conn)
+        summary["dropped_future_rows"] = store.drop_future_rows(conn, commit=False)
+        store.acknowledge_capture(conn, capture_id, captured.isoformat())
+        conn.commit()
+        return {"capture_id": capture_id, "acknowledged": True,
+                "stored": summary, "errors": []}
+    except Exception as e:
+        conn.rollback()
+        return {"capture_id": capture_id, "acknowledged": False, "stored": {},
+                "errors": [f"capture: {type(e).__name__}: {e}"]}
+    finally:
+        conn.close()
 
 
 def rebuild() -> subprocess.CompletedProcess:
@@ -263,6 +401,9 @@ def main() -> None:
     print(json.dumps(result, indent=1))
     for e in result["errors"]:
         print("  ERROR", e, file=sys.stderr)
+
+    if not result.get("acknowledged"):
+        raise SystemExit(1)
 
     if "--no-rebuild" not in sys.argv:
         try:

@@ -308,6 +308,22 @@ def _ring_status(conn, days: int = 7) -> dict:
     }
 
 
+def _capture_acknowledgements(conn, limit: int = 100) -> tuple[list[str], str | None]:
+    try:
+        rows = pd.read_sql_query(
+            "SELECT capture_id, imported_at FROM capture_imports "
+            "ORDER BY imported_at DESC LIMIT ?", conn, params=(limit,))
+    except pd.errors.DatabaseError as exc:
+        # Older/private databases may not have seen a phone import yet. The
+        # absence of the table means no exact capture can be acknowledged.
+        if "no such table: capture_imports" in str(exc):
+            return [], None
+        raise
+    if rows.empty:
+        return [], None
+    return [str(r.capture_id) for r in rows.itertuples()], str(rows.iloc[0]["imported_at"])
+
+
 def build(db: Path = DB) -> dict:
     with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
         sleep = _sleep(conn)
@@ -317,6 +333,7 @@ def build(db: Path = DB) -> dict:
         device = _device(conn)
         series_detail = _series_detail(conn)
         ring_status = _ring_status(conn)
+        capture_ack_ids, capture_ack_at = _capture_acknowledgements(conn)
 
     en = energy.daily_energy(db)
     prof = energy.load_profile()
@@ -331,6 +348,8 @@ def build(db: Path = DB) -> dict:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "ring": "COLMI R02_C302",
             "span": load.data_span(db),
+            "capture_ack_ids": capture_ack_ids,
+            "capture_ack_at": capture_ack_at,
             "note": "Timestamps are naive LOCAL time.",
         },
         "readiness": {

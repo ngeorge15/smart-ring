@@ -21,3 +21,7 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# Runtime build/ingest locks (serve.py), not source
+web/.build.lock
+web/.build-serialize.lock

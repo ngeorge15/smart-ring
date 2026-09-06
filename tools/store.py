@@ -51,6 +51,11 @@ CREATE TABLE IF NOT EXISTS series_samples (
     ts_inferred INTEGER DEFAULT 1,
     PRIMARY KEY (kind, day, idx)
 );
+CREATE TABLE IF NOT EXISTS capture_imports (
+    capture_id  TEXT PRIMARY KEY,
+    captured_at TEXT NOT NULL,
+    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -60,7 +65,7 @@ def connect(db: Path = DB) -> sqlite3.Connection:
     return conn
 
 
-def save_sleep(conn, nights) -> int:
+def save_sleep(conn, nights, *, commit: bool = True) -> int:
     n = 0
     for night in nights:
         t = night.totals
@@ -85,11 +90,13 @@ def save_sleep(conn, nights) -> int:
                 (night.night_of.isoformat(), s.start.isoformat(), s.stage, s.minutes),
             )
         n += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return n
 
 
-def save_series(conn, kind: str, day: str, interval_min: int, values) -> int:
+def save_series(conn, kind: str, day: str, interval_min: int, values,
+                *, commit: bool = True) -> int:
     n = 0
     for i, v in enumerate(values):
         if v is None:
@@ -100,7 +107,8 @@ def save_series(conn, kind: str, day: str, interval_min: int, values) -> int:
             (kind, day, i, interval_min, float(v)),
         )
         n += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return n
 
 
@@ -128,7 +136,7 @@ def normalise_timestamps(conn) -> int:
     return changed
 
 
-def drop_future_rows(conn) -> int:
+def drop_future_rows(conn, *, commit: bool = True) -> int:
     """
     Delete ring rows timestamped in the future -- physically impossible, and the
     unambiguous signature of a ring clock running ahead of local time.
@@ -143,15 +151,35 @@ def drop_future_rows(conn) -> int:
     for table in ("heart_rates", "sport_details"):
         cur = conn.execute(f"DELETE FROM {table} WHERE timestamp > ?", (now,))
         n += cur.rowcount
-    conn.commit()
+    if commit:
+        conn.commit()
     return n
 
 
-def save_battery(conn, level: int, charging: bool) -> None:
+def save_battery(conn, level: int, charging: bool, *, ts: str | None = None,
+                 commit: bool = True) -> None:
     """One row per sync. A charge is later inferred from this series -- the ring
     reports no charge history, so the only way to know when it was last topped
     up is to have been watching."""
     from datetime import datetime
     conn.execute("INSERT OR REPLACE INTO battery_log (ts, level, charging) VALUES (?,?,?)",
-                 (datetime.now().isoformat(timespec="seconds"), int(level), int(charging)))
-    conn.commit()
+                 (ts or datetime.now().isoformat(timespec="seconds"),
+                  int(level), int(charging)))
+    if commit:
+        conn.commit()
+
+
+def capture_is_acknowledged(conn: sqlite3.Connection, capture_id: str) -> bool:
+    """Whether the exact raw capture has already committed successfully."""
+    return conn.execute(
+        "SELECT 1 FROM capture_imports WHERE capture_id = ?", (capture_id,)
+    ).fetchone() is not None
+
+
+def acknowledge_capture(conn: sqlite3.Connection, capture_id: str,
+                        captured_at: str) -> None:
+    """Record an acknowledgement inside the caller's ingest transaction."""
+    conn.execute(
+        "INSERT OR IGNORE INTO capture_imports (capture_id, captured_at) VALUES (?, ?)",
+        (capture_id, captured_at),
+    )
