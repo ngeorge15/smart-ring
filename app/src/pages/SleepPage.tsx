@@ -25,8 +25,9 @@ export function SleepPage() {
     <>
       <DayPicker days={nights.map((n) => n.night_of)} index={i} onChange={setI} />
       {night && (
-        <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
-          <div className="flex items-center gap-4">
+        <Card style={{ viewTransitionName: "vt-sleep" }}
+              className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
+          <div className="sleep-summary flex items-center gap-4">
             <div className="min-w-0 flex-1">
               <div className="text-[11px] font-[660] uppercase tracking-[0.11em] text-ink-3">
                 Time asleep
@@ -35,16 +36,18 @@ export function SleepPage() {
                 {hm(night.asleep_min)}
               </div>
               <div className="mt-1.5 text-[12.5px]" style={{ color: b.color }}>
-                {b.word}
+                {score == null ? "Not scored" : b.word}
                 <span className="text-ink-3">
                   {" "}· {base?.mean ? `${hm(Math.round(base.mean))} typical` : "no baseline"}
                 </span>
               </div>
             </div>
-            <div className="shrink-0">
+            <div className="sleep-efficiency shrink-0">
               <MiniScore score={night.efficiency} label="Efficiency"
                          value={`${Math.round(night.efficiency)}%`}
-                         note="of time in bed" />
+                         note={night.awake_min === 0
+                           ? "Zero wakes logged; likely overstated"
+                           : "of time in bed"} />
             </div>
           </div>
         </Card>

@@ -133,8 +133,8 @@
 
    The DATA colours below are the validated categorical palette (validated with
    the dataviz validator: three sleep slots pass all-pairs in both modes; the
-   status trio is used one-at-a-time and always paired with a text label, so the
-   adjacent-pair gates do not apply to it). Do not "tidy" these hexes.
+   status trio is used one-at-a-time and always paired with a text label. Its
+   theme-specific values also clear normal-text contrast on the card surfaces.
 --------------------------------------------------------------------------- */
 :root {
   /* Warm paper rather than white. The near-white surface was uncomfortable to
@@ -149,7 +149,7 @@
      unselected bars were effectively invisible. This is a mark colour, sized
      for contrast against --surface-1, not a surface. */
   --bar:#847d6e;   /* 3.39:1 on the card -- a mark you read, not a surface */
-  --ink:#17150f; --ink-2:#4e4a42; --ink-3:#7e786c;
+  --ink:#17150f; --ink-2:#4e4a42; --ink-3:#696359;
   --hairline:#cbc6b7;
   /* Stage steps darkened one notch for the dimmer surface. On the original
      near-white they were fine; against #edeae0 orange and aqua both slid well
@@ -157,8 +157,8 @@
      CVD separation from 9.4 to 6.5, and telling two stages apart matters more
      than a hair of contrast -- the legend and table view relieve the latter. */
   --deep:#2a78d6; --light-stage:#d95926; --rem:#199e70; --awake:#c3c2b7;
-  --brand:#2a78d6;
-  --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+  --brand:#1d5fae; --brand-action:#1d5fae; --brand-action-foreground:#ffffff;
+  --good:#08750b; --warning:#775600; --critical:#b32323;
   /* Diverging pair for sleep debt: surplus vs deficit around a zero baseline.
      Documented blue<->red poles with a NEUTRAL midpoint -- never a hue at zero.
      These are the SERIES red, not --critical: a status colour must not
@@ -169,10 +169,11 @@
 .dark {
   --plane:#08090b; --surface-1:#111419; --surface-2:#181c23; --raise:#1e232b;
   --bar:#5b6472;
-  --ink:#f7f8fa; --ink-2:#aab2be; --ink-3:#69717e;
+  --ink:#f7f8fa; --ink-2:#aab2be; --ink-3:#87909d;
   --hairline:#222831;
   --deep:#3987e5; --light-stage:#d95926; --rem:#199e70; --awake:#3a4049;
-  --brand:#3987e5;
+  --brand:#3987e5; --brand-action:#246ebb; --brand-action-foreground:#ffffff;
+  --good:#35c759; --warning:#f2b134; --critical:#ff6b6b;
   --surplus:#3987e5; --deficit:#e66767; --midpoint:#383835;
 }
 
@@ -213,6 +214,8 @@
   --color-stage-rem: var(--rem);
   --color-stage-awake: var(--awake);
   --color-brand: var(--brand);
+  --color-brand-action: var(--brand-action);
+  --color-brand-action-foreground: var(--brand-action-foreground);
   --color-good: var(--good);
   --color-warning: var(--warning);
   --color-critical: var(--critical);
@@ -228,7 +231,29 @@ body {
   padding: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + 2.5rem);
 }
 .tnum { font-variant-numeric: tabular-nums; }
-@keyframes rise { from { opacity:0; transform:translateY(9px) } to { opacity:1; transform:none } }
+
+/* Mini cards keep two columns when there is room and become readable rows on
+   narrow phones. Notes may use two lines; decorative sparks are not mounted
+   at this breakpoint so Recharts never measures a zero-size hidden box. */
+.mini-score-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.today-jump-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.mini-score-note {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+@media (max-width: 430px) {
+  .mini-score-grid { grid-template-columns: minmax(0, 1fr); }
+  .today-jump-grid { grid-template-columns: minmax(0, 1fr); }
+  .sleep-summary { align-items: stretch; flex-direction: column; }
+  .sleep-efficiency > * { width: 100%; }
+}
+@media (max-width: 389px) {
+  .device-charge { order: 3; flex-basis: 100%; }
+  .device-date { margin-left: auto; }
+}
+@keyframes rise { from { transform:translateY(9px) } to { transform:none } }
 .rise { animation: rise .5s cubic-bezier(.22,.75,.3,1) both; }
 @media (prefers-reduced-motion: reduce) {
   .rise { animation: none }
@@ -261,6 +286,23 @@ body {
 }
 .heartbeat { animation: heartbeat 1.6s ease-in-out infinite; transform-origin: center; }
 @media (prefers-reduced-motion: reduce) { .heartbeat { animation: none } }
+
+/* Indeterminate progress -- opacity breathes rather than filling a ring to a
+   percentage that isn't known yet (connecting, before any step has run).
+   Kept distinct from .heartbeat, which is reserved for the live-HR icon's
+   own signature pulse -- reusing it here would blur what it means there. */
+@keyframes breathe { 0%, 100% { opacity: .35 } 50% { opacity: .85 } }
+.breathe { animation: breathe 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .breathe { animation: none; opacity: .6 } }
+
+/* Native cross-fade between tabs (App.tsx's changeTab). The browser default
+   is already a plain fade, not a slide/zoom -- kept as-is rather than tuned,
+   consistent with every other animation here staying subtle by default. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
 
 /* Recharts moves focus to an internal <g> on tap, and the browser paints its
    default 5px focus ring around it -- a blue box round the entire plot, on a

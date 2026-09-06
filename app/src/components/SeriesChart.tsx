@@ -7,6 +7,12 @@ const clock = (m: number) => {
   return `${h % 12 === 0 ? 12 : h % 12}${h < 12 ? "am" : "pm"}`;
 };
 
+const clockExact = (m: number) => {
+  const h = Math.floor(m / 60) % 24;
+  const mins = Math.floor(m % 60);
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(mins).padStart(2, "0")}${h < 12 ? "am" : "pm"}`;
+};
+
 export function SeriesChart({ kind, title, unit, decimals = 0, day: pinned, transform }: {
   kind: string; title: string; unit: string; decimals?: number; day?: string;
   /** Convert stored units for display. Values are stored raw so the conversion
@@ -37,6 +43,25 @@ export function SeriesChart({ kind, title, unit, decimals = 0, day: pinned, tran
   // pad the axis so a flat series doesn't render as a line pinned to an edge
   const pad = Math.max((hi - lo) * 0.25, hi - lo < 2 ? 1.5 : 0);
 
+  if (rows.length === 1) {
+    return (
+      <Card className="rise mb-3 border-hairline bg-surface-1 px-[18px] py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-[11px] font-[660] uppercase tracking-[0.11em] text-ink-3">{title}</h2>
+            <p className="mt-1 text-[11.5px] text-ink-3">One reading · {clockExact(rows[0].minute)}</p>
+          </div>
+          <div className="flex shrink-0 items-baseline">
+            <b className="tnum text-[28px] font-[640] leading-none tracking-[-0.03em]">
+              {rows[0].value.toFixed(decimals)}
+            </b>
+            <span className="ml-1 text-[13px] font-medium text-ink-3">{unit.trim()}</span>
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
   return (
     <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
       <div className="flex items-baseline justify-between">
@@ -54,7 +79,8 @@ export function SeriesChart({ kind, title, unit, decimals = 0, day: pinned, tran
 
       <div className="mt-2 h-[92px] w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={rows} margin={{ top: 6, right: 4, bottom: 0, left: 0 }}>
+          <AreaChart data={rows} margin={{ top: 6, right: 4, bottom: 0, left: 0 }}
+                     accessibilityLayer={false}>
             <defs>
               <linearGradient id={`fill-${kind}`} x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="var(--brand)" stopOpacity={0.35} />

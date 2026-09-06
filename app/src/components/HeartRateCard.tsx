@@ -24,7 +24,7 @@ const clockOf = (iso: string) => {
 
 export function HeartRateCard() {
   const run = latestRun(DATA.hr.points);
-  if (run.length < 2) {
+  if (!run.length) {
     return (
       <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
         <h2 className="text-[11px] font-[660] uppercase tracking-[0.11em] text-ink-3">Heart rate</h2>
@@ -39,6 +39,28 @@ export function HeartRateCard() {
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
   const rows = run.map((p) => ({ ...p, ms: new Date(p.t).getTime() }));
+
+  if (run.length === 1) {
+    return (
+      <Card className="rise mb-3 border-hairline bg-surface-1 px-[18px] py-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-[11px] font-[660] uppercase tracking-[0.11em] text-ink-3">
+              Heart rate
+            </h2>
+            <p className="mt-1 text-[11.5px] text-ink-3">One reading · {clockOf(latest.t)}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Heart size={18} strokeWidth={0} fill="var(--critical)" />
+            <b className="tnum text-[28px] font-[640] leading-none tracking-[-0.03em]">
+              {Math.round(latest.v)}
+            </b>
+            <span className="text-[13px] font-medium text-ink-3">bpm</span>
+          </div>
+        </div>
+      </Card>
+    );
+  }
 
   return (
     <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
@@ -60,7 +82,8 @@ export function HeartRateCard() {
 
       <div className="mt-3 h-[110px] w-full">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={rows} margin={{ top: 6, right: 4, bottom: 0, left: 0 }}>
+          <AreaChart data={rows} margin={{ top: 6, right: 4, bottom: 0, left: 0 }}
+                     accessibilityLayer={false}>
             <defs>
               <linearGradient id="fill-hr" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stopColor="var(--brand)" stopOpacity={0.34} />
