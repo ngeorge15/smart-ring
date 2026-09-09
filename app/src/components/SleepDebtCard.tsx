@@ -72,7 +72,7 @@ export function SleepDebtCard() {
   return (
     <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
       <div className="flex items-baseline justify-between">
-        <h2 className="text-[11px] font-[660] uppercase tracking-[0.11em] text-ink-3">
+        <h2 className="text-[13px] font-[660] text-ink-2">
           Sleep debt
         </h2>
         <span className="text-[11px] text-ink-3">{hm(D.target_min)} target</span>

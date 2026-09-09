@@ -13,10 +13,9 @@ export function Section({ title, right, children }: {
 }) {
   return (
     <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
-      <h2 className="mb-4 flex items-center justify-between text-[11px] font-[660]
-                     uppercase tracking-[0.11em] text-ink-3">
+      <h2 className="mb-4 flex items-center justify-between text-[13px] font-[660] text-ink-2">
         {title}
-        {right && <span className="font-medium normal-case tracking-normal">{right}</span>}
+        {right && <span className="text-[11.5px] font-medium text-ink-3">{right}</span>}
       </h2>
       {children}
     </Card>
@@ -154,12 +153,12 @@ export function Hypnogram({ segments, night, title = "Sleep" }:
   const totals: Record<string, number> = {};
   segments.forEach((s) => (totals[s.stage] = (totals[s.stage] || 0) + s.minutes));
 
-  let acc = 0;
-  const placed = segments.map((sg) => {
-    const left = (acc / total) * 100;
-    acc += sg.minutes;
-    return { ...sg, left, width: (sg.minutes / total) * 100 };
-  });
+  const placed = segments.reduce<{ rows: (Segment & { left: number; width: number })[];
+                                    elapsed: number }>((state, sg) => ({
+    rows: [...state.rows, { ...sg, left: (state.elapsed / total) * 100,
+                            width: (sg.minutes / total) * 100 }],
+    elapsed: state.elapsed + sg.minutes,
+  }), { rows: [], elapsed: 0 }).rows;
 
   /* ---- lane geometry, shared by the bars and the overlay ----
      The connectors and gridlines are absolutely positioned over the SAME stack
