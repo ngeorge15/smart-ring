@@ -1,6 +1,6 @@
 # Ring
 
-**A local-first biometric platform built on top of a reverse-engineered $20 smart ring.**
+**A local-first biometric platform built on top of a reverse-engineered $55 smart ring.**
 
 Commercial rings (Oura, Ultrahuman) pair capable sensors with a locked ecosystem —
 your data lives on their server, insights arrive as an opaque score, and real
