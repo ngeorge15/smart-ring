@@ -112,7 +112,7 @@ across non-equivalent metrics (Apple records HRV as SDNN, the ring reports
 RMSSD — a ~1.7× magnitude difference that would silently corrupt every reading).
 
 **Frontend.** React 19, TypeScript, Tailwind v4, shadcn/ui, Recharts — compiled
-to a single self-contained HTML file that works entirely offline. A six-tab
+to a single self-contained HTML file that works entirely offline. A three-tab
 mobile interface with a WCAG-validated palette, programmatically checked for
 colorblind separation and contrast in both light and dark themes.
 
