@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { DATA } from "@/lib/data";
 import { fetchJson } from "@/lib/http";
@@ -236,33 +237,54 @@ export function RingPage() {
         </p>
       </Section>
 
-      <Section title="Recent syncs" right={`${R.recent_syncs.length} shown`}>
-        {R.recent_syncs.map((s) => (
-          <div key={s.id} className="flex items-baseline justify-between border-t
-                                     border-hairline py-2 first:border-t-0 first:pt-0">
-            <span className="text-[12.5px]">{clock(s.at)}</span>
-            <span className="text-[11px] font-[620] uppercase tracking-[0.08em]"
-                  style={{ color: s.source === "phone" ? "var(--brand)" : "var(--ink-3)" }}>
-              {s.source}
+      <Card className="rise mb-3 border-hairline bg-surface-1 px-[18px] py-1">
+        <details className="group">
+          <summary className="flex min-h-[52px] cursor-pointer list-none items-center justify-between gap-3
+                              rounded-lg py-2 [&::-webkit-details-marker]:hidden">
+            <span className="text-[13px] font-[660] text-ink-2">Advanced diagnostics</span>
+            <span className="flex shrink-0 items-center gap-1 text-[11.5px] text-ink-3">
+              Details
+              <ChevronDown size={15} className="transition-transform group-open:rotate-180" />
             </span>
-          </div>
-        ))}
-      </Section>
+          </summary>
 
-      <KnownLimits />
+          <div className="border-t border-hairline pt-1 pb-[14px]">
+            <p className="border-t border-hairline pt-2.5 text-[11px] font-[660] uppercase
+                          tracking-[0.09em] text-ink-3 first:border-t-0 first:pt-0">
+              Recent syncs
+            </p>
+            {R.recent_syncs.map((s) => (
+              <div key={s.id} className="flex items-baseline justify-between border-t
+                                         border-hairline py-2">
+                <span className="text-[12.5px]">{clock(s.at)}</span>
+                <span className="text-[11px] font-[620] uppercase tracking-[0.08em]"
+                      style={{ color: s.source === "phone" ? "var(--brand)" : "var(--ink-3)" }}>
+                  {s.source}
+                </span>
+              </div>
+            ))}
 
-      <Section title="Stored records">
-        {Object.entries(R.counts).map(([k, v]) => (
-          <div key={k} className="flex items-baseline justify-between border-t
-                                  border-hairline py-2 first:border-t-0 first:pt-0">
-            <span className="text-[12.5px]">{k.replace(/_/g, " ")}</span>
-            <span className="tnum text-[13px] font-[660]">{v.toLocaleString()}</span>
+            <p className="mt-2.5 border-t border-hairline pt-2.5 text-[11px] font-[660]
+                          uppercase tracking-[0.09em] text-ink-3">
+              Stored records
+            </p>
+            {Object.entries(R.counts).map(([k, v]) => (
+              <div key={k} className="flex items-baseline justify-between border-t
+                                      border-hairline py-2">
+                <span className="text-[12.5px]">{k.replace(/_/g, " ")}</span>
+                <span className="tnum text-[13px] font-[660]">{v.toLocaleString()}</span>
+              </div>
+            ))}
+            <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
+              Span {DATA.meta.span.days} days · {DATA.meta.span.hr_samples.toLocaleString()} heart-rate samples.
+            </p>
+
+            <div className="mt-2.5 border-t border-hairline pt-2.5">
+              <KnownLimits />
+            </div>
           </div>
-        ))}
-        <p className="mt-2 text-[11.5px] leading-relaxed text-ink-3">
-          Span {DATA.meta.span.days} days · {DATA.meta.span.hr_samples.toLocaleString()} heart-rate samples.
-        </p>
-      </Section>
+        </details>
+      </Card>
     </>
   );
 }

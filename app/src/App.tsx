@@ -1,32 +1,71 @@
 import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
-import { Moon, RefreshCw, Sun } from "lucide-react";
+import { BatteryFull, BatteryLow, BatteryMedium, BatteryWarning, CircleDot, Plug } from "lucide-react";
 import { DATA } from "@/lib/data";
 import { overlayState } from "@/lib/overlay";
 import { fetchJson, rebuildDashboard } from "@/lib/http";
 import { useSwipe } from "@/lib/useSwipe";
+import { useTheme, type ThemePref } from "@/lib/theme";
 import { Nav, TAB_ORDER, type Tab } from "@/components/Nav";
+import { DeviceSheet } from "@/components/DeviceSheet";
 import { Today } from "@/pages/Today";
-import { SleepPage } from "@/pages/SleepPage";
-import { ActivityPage } from "@/pages/Activity";
-import { Vitals } from "@/pages/Vitals";
+import { MetricsPage, type MetricDomain } from "@/pages/MetricsPage";
 import { TrendsPage } from "@/pages/TrendsPage";
-import { RingPage } from "@/pages/RingPage";
 
-const TITLES: Record<Tab, string> = {
-  today: "Today", sleep: "Sleep", activity: "Activity", vitals: "Vitals",
-  trends: "Trends", ring: "Ring",
-};
+const TITLES: Record<Tab, string> = { today: "Today", metrics: "Metrics", trends: "Trends" };
+
+/** Battery + a freshness dot, nothing else -- the full picture lives one tap
+    away in the device sheet. Deliberately duplicates DeviceStrip's threshold
+    logic rather than sharing it: that component now only renders when
+    something needs attention, this one is always-on chrome, and the two
+    diverging slightly costs less than coupling them. */
+function batteryIcon(level: number, charging: boolean) {
+  if (charging) return <Plug size={14} color="var(--good)" />;
+  const c = level <= 15 ? "var(--critical)" : level <= 30 ? "var(--warning)" : "var(--ink-2)";
+  const Icon = level > 66 ? BatteryFull : level > 33 ? BatteryMedium : level > 15 ? BatteryLow : BatteryWarning;
+  return <Icon size={15} color={c} />;
+}
+function freshnessColor(iso: string | null): string {
+  if (!iso) return "var(--ink-3)";
+  const mins = (Date.now() - new Date(iso.replace(" ", "T")).getTime()) / 60000;
+  if (mins < 90) return "var(--good)";
+  if (mins < 60 * 12) return "var(--warning)";
+  return "var(--critical)";
+}
+
+function DeviceStatusButton({ onClick }: { onClick: () => void }) {
+  const D = DATA.device;
+  return (
+    <button onClick={onClick} aria-label="Ring and device settings"
+            className="flex h-11 items-center gap-1.5 rounded-full border border-hairline
+                       bg-surface-2 px-3 text-ink-2 active:scale-95">
+      <CircleDot size={15} className="text-ink-3" />
+      {D.battery != null && (
+        <span className="flex items-center gap-1">
+          {batteryIcon(D.battery, D.charging)}
+          <span className="tnum text-[12.5px] font-[600]">{D.battery}%</span>
+        </span>
+      )}
+      <i aria-hidden className="h-[7px] w-[7px] shrink-0 rounded-full"
+         style={{ background: freshnessColor(D.latest_reading) }} />
+    </button>
+  );
+}
 
 export default function App() {
-  const [dark, setDark] = useState(() => {
-    try { return localStorage.getItem("ring-theme") !== "light"; } catch { return true; }
-  });
+  const { pref: themePref, setTheme } = useTheme();
+  function changeTheme(pref: ThemePref) {
+    if (!document.startViewTransition) { setTheme(pref); return; }
+    document.startViewTransition(() => flushSync(() => setTheme(pref)));
+  }
+
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; detail: string } | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   // Refresh the dashboard from the Mac's database. Ring capture is a separate
-  // action on the Ring page and may be running in a different browser's storage.
+  // action reachable from the device sheet and may be running in a different
+  // browser's storage.
   async function refresh() {
     if (busy) return;
     setBusy(true);
@@ -42,12 +81,6 @@ export default function App() {
       return;
     }
     try {
-      /* Rebuild only. There is deliberately no queue drain here: the capture
-         queue lives in Bluefy's IndexedDB, and Safari -- where this runs --
-         cannot see another iOS app's storage. The drain that used to sit here
-         was a permanent no-op that read an always-empty store, and it implied
-         the dashboard contributed to uploading when it structurally cannot.
-         sync.html drains its own queue, in the app that owns it. */
       await rebuildDashboard();
     } catch {
       setBusy(false);
@@ -66,6 +99,7 @@ export default function App() {
   }
 
   const [tab, setTab] = useState<Tab>("today");
+  const [metricsDomain, setMetricsDomain] = useState<MetricDomain | null>(null);
   /* Native cross-fade between tabs, no library: startViewTransition needs the
      DOM mutation to land SYNCHRONOUSLY inside its callback to snapshot
      before/after correctly, which React's default batching won't do on its
@@ -74,6 +108,12 @@ export default function App() {
   function changeTab(t: Tab) {
     if (!document.startViewTransition) { setTab(t); return; }
     document.startViewTransition(() => flushSync(() => setTab(t)));
+  }
+  /** Today's jump-off cards used to switch straight to a top-level tab; Sleep
+      and Activity are one level deeper now, inside Metrics. */
+  function openMetric(domain: MetricDomain) {
+    if (!document.startViewTransition) { setTab("metrics"); setMetricsDomain(domain); return; }
+    document.startViewTransition(() => flushSync(() => { setTab("metrics"); setMetricsDomain(domain); }));
   }
   // Swipe order matches the nav's left-to-right icon order, so "swipe left"
   // always means the same thing as "the next icon over" -- never surprising.
@@ -130,10 +170,6 @@ export default function App() {
                    removeEventListener("pageshow", onPageShow); };
   }, []);
 
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", dark);
-    try { localStorage.setItem("ring-theme", dark ? "dark" : "light"); } catch { /* ignore */ }
-  }, [dark]);
   // returning to a tab should start at the top, as it does in Apple's apps
   useEffect(() => { window.scrollTo({ top: 0 }); }, [tab]);
 
@@ -155,11 +191,6 @@ export default function App() {
             <h1 className="text-[26px] font-[660] leading-tight tracking-[-0.028em]">
               {tab === "today" ? `${greeting}!` : TITLES[tab]}
             </h1>
-            {/* Only Today carries a subtitle. "synced HH:MM" used to sit under
-                every other tab, which was both redundant and misleading -- it
-                is the snapshot BUILD time, not data freshness. The Ring tab now
-                shows build time, reading age, and per-source sync times
-                properly, so one honest place beats five ambiguous ones. */}
             {tab === "today" && (
               <p className="mt-1 text-[12px] text-ink-3">
                 {when.toLocaleDateString(undefined,
@@ -167,23 +198,7 @@ export default function App() {
               </p>
             )}
           </div>
-          <div className="flex shrink-0 gap-2">
-            <button onClick={refresh} disabled={busy} aria-label="Refresh data"
-                    className="flex h-11 w-11 items-center justify-center rounded-full
-                               border border-hairline bg-surface-2 text-ink-2
-                               active:scale-95 disabled:opacity-50">
-              <RefreshCw size={16} className={busy ? "animate-spin" : undefined} />
-            </button>
-            <button onClick={() => {
-                      const flip = () => setDark((v) => !v);
-                      if (document.startViewTransition) document.startViewTransition(() => flushSync(flip));
-                      else flip();
-                    }} aria-label="Toggle light or dark theme"
-                    className="flex h-11 w-11 items-center justify-center rounded-full
-                               border border-hairline bg-surface-2 text-ink-2 active:scale-95">
-              {dark ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-          </div>
+          <DeviceStatusButton onClick={() => setSheetOpen(true)} />
         </header>
 
         {/* Provenance. These numbers were decoded and scored on the PHONE
@@ -220,14 +235,14 @@ export default function App() {
           </button>
         )}
 
-        {tab === "today" && <Today go={changeTab} />}
-        {tab === "sleep" && <SleepPage />}
-        {tab === "activity" && <ActivityPage />}
-        {tab === "vitals" && <Vitals />}
+        {tab === "today" && <Today onOpenMetric={openMetric} onOpenDevice={() => setSheetOpen(true)} />}
+        {tab === "metrics" && <MetricsPage domain={metricsDomain} onDomainChange={setMetricsDomain} />}
         {tab === "trends" && <TrendsPage />}
-        {tab === "ring" && <RingPage />}
       </main>
       <Nav tab={tab} onChange={changeTab} />
+      <DeviceSheet open={sheetOpen} onOpenChange={setSheetOpen}
+                   themePref={themePref} onThemeChange={changeTheme}
+                   onRefresh={refresh} refreshing={busy} />
     </>
   );
 }

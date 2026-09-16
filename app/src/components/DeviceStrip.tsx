@@ -35,6 +35,19 @@ function BatteryIcon({ level, charging }: { level: number; charging: boolean }) 
   return <Icon size={16} color={c} />;
 }
 
+/** Whether the compact strip is worth showing at all. Healthy operation
+    shows nothing here -- the header's device-status dot already carries the
+    ambient signal; this earns its screen space only when something wants
+    action: stale data, a sync that's fallen behind, or a critical battery. */
+export function deviceNeedsAttention(): boolean {
+  const d = DATA.device;
+  const data = ago(d.latest_reading);
+  const stale = DATA.readiness.day !== localDayKey();
+  const behind = data ? freshness(data.hours).word !== "up to date" : true;
+  const criticalBattery = d.battery != null && d.battery <= 15 && !d.charging;
+  return stale || behind || criticalBattery;
+}
+
 export function DeviceStrip() {
   const d = DATA.device;
   const data = ago(d.latest_reading);
@@ -46,7 +59,7 @@ export function DeviceStrip() {
   const stale = DATA.readiness.day !== localDayKey();
 
   return (
-    <div className="device-strip rise mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[13px]
+    <div className="device-strip rise mb-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[18px]
                     border border-hairline bg-surface-1 px-3.5 py-2.5 text-[12px]">
       <span className="flex items-center gap-1.5">
         <BatteryIcon level={d.battery ?? 0} charging={d.charging} />
