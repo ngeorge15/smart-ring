@@ -52,7 +52,7 @@ export function ActivityPage() {
   return (
     <>
       {!shownIsToday && (
-        <p className="rise mb-3 rounded-[13px] border border-hairline bg-surface-2 px-3.5 py-2.5
+        <p className="rise mb-3 rounded-[18px] border border-hairline bg-surface-2 px-3.5 py-2.5
                       text-[12px] text-ink-2">
           No activity recorded today
           <span className="text-ink-3"> · showing the latest day, {displayDate(shown.day)}</span>

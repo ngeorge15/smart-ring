@@ -31,7 +31,7 @@ export function DayPicker({ days, index, onChange }: {
 
   if (days.length === 1) {
     return (
-      <div className="rise mb-3 rounded-[13px] border border-hairline bg-surface-1 px-4 py-3 text-center">
+      <div className="rise mb-3 rounded-[18px] border border-hairline bg-surface-1 px-4 py-3 text-center">
         <div className="text-[14px] font-[600] tracking-tight">
           {isToday ? "Today" : d.toLocaleDateString(undefined,
             { weekday: "long", month: "short", day: "numeric" })}
@@ -43,7 +43,7 @@ export function DayPicker({ days, index, onChange }: {
 
   return (
     <div {...swipe}
-         className="rise mb-3 flex items-center justify-between rounded-[13px]
+         className="rise mb-3 flex items-center justify-between rounded-[18px]
                     border border-hairline bg-surface-1 px-1 py-1">
       <button onClick={() => !atOldest && onChange(index - 1)} disabled={atOldest}
               aria-label="Previous day"
