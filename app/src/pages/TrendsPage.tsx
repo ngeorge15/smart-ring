@@ -3,6 +3,7 @@ import { Bar, BarChart, Cell, ResponsiveContainer, XAxis, YAxis } from "recharts
 import { DATA, hm, hmShort, trendVerdict, type TrendMetric } from "@/lib/data";
 import { SleepDebtCard } from "@/components/SleepDebtCard";
 import { Section } from "@/components/Charts";
+import { Card } from "@/components/ui/card";
 
 const weekLabel = (w: string) =>
   new Date(w + "T12:00").toLocaleDateString(undefined, { month: "numeric", day: "numeric" });
@@ -128,6 +129,47 @@ function MetricBlock({ m, thisWeek, sel, onSelect }: {
   );
 }
 
+/** One improving, one declining -- ranked by delta magnitude among metrics
+    that are actually COMPARABLE (a real prior week to measure against, not a
+    partial one). Correlation between the two is never implied; they're
+    reported as two independent facts about the same window. */
+function TrendsSummary({ metrics, weeks }: { metrics: TrendMetric[]; weeks: number }) {
+  const comparable = metrics
+    .filter((m) => m.comparable && m.delta != null)
+    .map((m) => ({ m, v: trendVerdict(m.delta, m.better) }));
+  const improving = comparable.filter((x) => x.v.word === "improving")
+    .sort((a, b) => Math.abs(b.m.delta!) - Math.abs(a.m.delta!))[0];
+  const declining = comparable.filter((x) => x.v.word === "slipping")
+    .sort((a, b) => Math.abs(b.m.delta!) - Math.abs(a.m.delta!))[0];
+  const partial = metrics.filter((m) => !m.comparable).length;
+  if (!improving && !declining) return null;
+
+  return (
+    <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
+      <h2 className="text-[13px] font-[660] text-ink-2">Over the last {weeks} weeks</h2>
+      <div className="mt-2 space-y-1.5">
+        {improving && (
+          <p className="text-[13.5px] leading-snug">
+            <span className="font-[620]" style={{ color: "var(--good)" }}>{improving.m.title}</span>
+            {" "}improved by {fmt(improving.m, Math.abs(improving.m.delta!))}.
+          </p>
+        )}
+        {declining && (
+          <p className="text-[13.5px] leading-snug">
+            <span className="font-[620]" style={{ color: "var(--critical)" }}>{declining.m.title}</span>
+            {" "}declined by {fmt(declining.m, Math.abs(declining.m.delta!))}.
+          </p>
+        )}
+      </div>
+      {partial > 0 && (
+        <p className="mt-2 text-[11.5px] text-ink-3">
+          {partial} metric{partial === 1 ? "" : "s"} skipped — not enough history this window to compare fairly.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export function TrendsPage() {
   // One selection for the whole page: tapping in one chart clears any other.
   const [sel, setSel] = useState<{ key: string; i: number } | null>(null);
@@ -136,6 +178,7 @@ export function TrendsPage() {
 
   return (
     <>
+      {T && metrics.length > 0 && <TrendsSummary metrics={metrics} weeks={T.weeks} />}
       <SleepDebtCard />
 
       {metrics.length ? (
