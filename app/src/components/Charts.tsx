@@ -160,14 +160,14 @@ export function Hypnogram({ segments, night, title = "Sleep" }:
     elapsed: state.elapsed + sg.minutes,
   }), { rows: [], elapsed: 0 }).rows;
 
-  /* ---- lane geometry, shared by the bars and the overlay ----
-     The connectors and gridlines are absolutely positioned over the SAME stack
-     the lanes are laid out in, so these constants have to agree with the row
-     height and gap below or the lines drift off the bars. */
-  const LANE_H = 22, LANE_GAP = 4, LABEL_W = 52;
-  const laneY = (stage: string) =>
-    STAGE_ORDER.indexOf(stage) * (LANE_H + LANE_GAP) + LANE_H / 2;
-  const stackH = STAGE_ORDER.length * LANE_H + (STAGE_ORDER.length - 1) * LANE_GAP;
+  /* ---- level geometry, shared by the SVG trace and the label column below ----
+     One continuous path now, not four lane tracks: each stage is a LEVEL the
+     line sits at, not a row it lives in. LABEL_W has to agree with the label
+     column's real rendered width (w-11 + the gap beside it) or the hour
+     ticks/time-range text below drift out of alignment with the trace. */
+  const LEVEL_H = 20, LABEL_W = 52;
+  const svgH = STAGE_ORDER.length * LEVEL_H;
+  const yOf = (stage: string) => STAGE_ORDER.indexOf(stage) * LEVEL_H + LEVEL_H / 2;
   const pctOf = (d: Date) => ((d.getTime() - t0.getTime()) / 6e4 / total) * 100;
 
   /* Wall-clock ticks on even hours, the way a clock reads -- not evenly spaced
@@ -210,48 +210,43 @@ export function Hypnogram({ segments, night, title = "Sleep" }:
   return (
     <Section title={title} right={night ? nightLabel : undefined}>
       <div className="relative">
-        <div className="flex flex-col gap-1">
-          {STAGE_ORDER.map((stage) => (
-            <div key={stage} className="flex items-center gap-2">
-              <span className="w-11 shrink-0 text-right text-[10.5px] text-ink-3">{stage}</span>
-              <div className="relative h-[22px] flex-1 rounded-[4px] bg-raise/40">
-                {placed.filter((p) => p.stage === stage).map((p, i) => (
-                  <div key={i}
-                       title={`${p.stage} · ${p.minutes} min · from ${p.start_ts.slice(11, 16)}`}
-                       className="absolute inset-y-[3px] rounded-[3px]"
-                       style={{ left: `${p.left}%`, width: `max(2px, calc(${p.width}% - 2px))`,
-                                background: STAGE_COLOR[p.stage] ?? "var(--ink-3)" }} />
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {/* Overlay: hour gridlines, then the transition connectors on top.
-            pointer-events-none so the per-segment tooltips still work. */}
-        <div className="pointer-events-none absolute inset-y-0 right-0"
-             style={{ left: LABEL_W }}>
-          {ticks.map((d, i) => (
-            <i key={`g${i}`} className="absolute top-0 w-px"
-               style={{ left: `${pctOf(d)}%`, height: stackH,
-                        background: "var(--ink-3)", opacity: 0.16 }} />
-          ))}
-          {/* One thin line per stage change, from the lane it left to the lane
-              it entered. Without these the night is a field of disconnected
-              blocks; with them it reads as a single path through the stages,
-              which is the thing you are actually looking at. */}
-          {placed.slice(0, -1).map((p, i) => {
-            const next = placed[i + 1];
-            if (next.stage === p.stage) return null;
-            const y1 = laneY(p.stage), y2 = laneY(next.stage);
-            return (
-              <i key={`c${i}`} className="absolute w-px"
-                 style={{ left: `${p.left + p.width}%`,
-                          top: Math.min(y1, y2), height: Math.abs(y2 - y1),
-                          background: STAGE_COLOR[next.stage] ?? "var(--ink-3)",
-                          opacity: 0.5 }} />
-            );
-          })}
+        <div className="flex gap-2">
+          <div className="flex w-11 shrink-0 flex-col text-right text-[10.5px] text-ink-3"
+               style={{ height: svgH }}>
+            {STAGE_ORDER.map((stage) => (
+              <span key={stage} className="flex flex-1 items-center justify-end">{stage}</span>
+            ))}
+          </div>
+          {/* One continuous trace, not four lane tracks: each stage is a LEVEL
+              the line sits AT, stepping up and down as the night moves through
+              them, rounded caps at every join so it reads as one flowing shape
+              instead of separate floating bars. */}
+          <svg viewBox={`0 0 1000 ${svgH}`} width="100%" height={svgH}
+               preserveAspectRatio="none" className="block flex-1" role="img"
+               aria-label={`Sleep stages over the night, from ${fmt(t0)} to ${fmt(end)}`}>
+            {ticks.map((d, i) => (
+              <line key={`g${i}`} x1={pctOf(d) * 10} x2={pctOf(d) * 10} y1={0} y2={svgH}
+                    stroke="var(--ink-3)" strokeOpacity={0.16} strokeWidth={1} />
+            ))}
+            {placed.slice(0, -1).map((p, i) => {
+              const next = placed[i + 1];
+              if (next.stage === p.stage) return null;
+              const x = (p.left + p.width) * 10;
+              return (
+                <line key={`c${i}`} x1={x} x2={x} y1={yOf(p.stage)} y2={yOf(next.stage)}
+                      stroke={STAGE_COLOR[next.stage] ?? "var(--ink-3)"}
+                      strokeWidth={6} strokeLinecap="round" />
+              );
+            })}
+            {placed.map((p, i) => (
+              <line key={`s${i}`} x1={p.left * 10} x2={(p.left + p.width) * 10}
+                    y1={yOf(p.stage)} y2={yOf(p.stage)}
+                    stroke={STAGE_COLOR[p.stage] ?? "var(--ink-3)"}
+                    strokeWidth={6} strokeLinecap="round">
+                <title>{`${p.stage} · ${p.minutes} min · from ${p.start_ts.slice(11, 16)}`}</title>
+              </line>
+            ))}
+          </svg>
         </div>
 
         <NightSeries label="heart rate" pts={hrPts} t0={t0} total={total}
