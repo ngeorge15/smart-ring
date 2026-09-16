@@ -164,7 +164,6 @@ TypeScript · Tailwind CSS v4 · shadcn/ui · Recharts · Vite · launchd · Tai
 | [`PROTOCOL.md`](PROTOCOL.md) | The reverse-engineered BLE protocol itself |
 | [`docs/OFFLINE-DASHBOARD.md`](docs/OFFLINE-DASHBOARD.md) | The offline/local-first architecture and the storage-split problem it solves |
 | [`docs/TESTING.md`](docs/TESTING.md) | How the ingest pipeline and decode engine are tested |
-| [`docs/WORK-STORY.md`](docs/WORK-STORY.md) | The engineering narrative — what broke, what it took to fix |
 
 ## Status
 

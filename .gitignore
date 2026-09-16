@@ -25,3 +25,6 @@ __pycache__/
 # Runtime build/ingest locks (serve.py), not source
 web/.build.lock
 web/.build-serialize.lock
+
+# Personal interview-prep notes, never for the public repo
+docs/WORK-STORY.md
