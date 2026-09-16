@@ -9,7 +9,7 @@ import { Card } from "@/components/ui/card";
 export function SleepPage() {
   const R = DATA.readiness;
   const comps = R.components.filter((c) => c.name.startsWith("sleep") && c.available);
-  const score = comps.length
+  const latestScore = comps.length
     ? comps.reduce((s, c) => s + c.score! * c.weight, 0) /
       comps.reduce((s, c) => s + c.weight, 0) : null;
   // nights arrive newest-first; the picker wants oldest-first
@@ -19,6 +19,13 @@ export function SleepPage() {
   const segments = DATA.sleep.latest_segments.filter(
     (sg) => sg.night_of === night?.night_of);
   const base = DATA.baselines.sleep_min;
+  /* The snapshot carries exactly ONE sleep score -- the readiness engine's,
+     for R.day -- never one per night. Applying it to whichever night happens
+     to be on screen borrowed a stranger's score for every other night in the
+     picker. Only the night the score actually describes may show it; every
+     other night says so plainly instead of a silently wrong number. */
+  const isScoredNight = night?.night_of === R.day;
+  const score = isScoredNight ? latestScore : null;
   const b = band(score);
 
   return (
@@ -36,7 +43,7 @@ export function SleepPage() {
                 {hm(night.asleep_min)}
               </div>
               <div className="mt-1.5 text-[12.5px]" style={{ color: b.color }}>
-                {score == null ? "Not scored" : b.word}
+                {score == null ? "Not scored for this night" : b.word}
                 <span className="text-ink-3">
                   {" "}· {base?.mean ? `${hm(Math.round(base.mean))} typical` : "no baseline"}
                 </span>
