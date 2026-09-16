@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Area, AreaChart, ResponsiveContainer } from "recharts";
-import { band, confColor, type Component } from "@/lib/data";
+import { band, type Component } from "@/lib/data";
 import { Card } from "@/components/ui/card";
 
 const MINI_SCORE_BREAKPOINT = "(max-width: 430px)";
@@ -76,38 +76,41 @@ export function Arc({ score, r, stroke, color }: {
   );
 }
 
-export function Hero({ score, confidence, driver, asOf }: {
-  score: number | null; confidence: number; driver?: Component; asOf?: string;
+/**
+ * Readiness Spotlight: a compact horizontal card, not the old full-width
+ * centered dial. The ring is always BRAND blue now, not the good/warning/
+ * critical band colour -- that colour-coding moved to the status WORD only,
+ * so the word (not a colour alone) is what carries "how am I doing," and a
+ * colourblind reader loses nothing. Confidence is deliberately absent here;
+ * it lives in "Why this score?" now, where it belongs next to the reasoning
+ * that explains it rather than competing with the score for the first glance.
+ */
+export function Hero({ score, driver, asOf }: {
+  score: number | null; driver?: Component; asOf?: string;
 }) {
   const b = band(score);
   const shown = useCountUp(score == null ? null : Math.round(score));
   return (
-    <Card className="rise relative overflow-hidden border-hairline bg-surface-1 px-5 pt-7 pb-6 mb-3">
-      <div aria-hidden className="pointer-events-none absolute left-1/2 -top-[46%] h-[300px] w-[300px]
-                                  -translate-x-1/2 rounded-full opacity-20"
-           style={{ background: `radial-gradient(circle, ${b.glow} 0%, transparent 68%)` }} />
-      <div className="relative mx-auto w-[172px]">
-        <Arc score={score} r={76} stroke={11} color={b.color} />
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <b className="tnum text-[52px] font-[640] leading-none tracking-[-0.045em]">
+    <Card className="rise mb-3 flex flex-row items-center gap-4 rounded-[22px] border-hairline bg-surface-1 p-[18px]">
+      <div className="relative h-[100px] w-[100px] shrink-0">
+        <Arc score={score} r={42} stroke={9} color="var(--brand)" />
+        <div className="absolute inset-0 flex items-center justify-center">
+          <b className="tnum text-[30px] font-[640] leading-none tracking-[-0.03em]">
             {shown == null ? "—" : shown}
           </b>
-          <span className="mt-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">
-            Readiness{asOf ? ` · ${asOf}` : ""}
-          </span>
         </div>
       </div>
-      <div className="relative mt-4 text-center">
-        <div className="text-base font-semibold tracking-tight" style={{ color: b.color }}>{b.word}</div>
-        <p className="mx-auto mt-1 max-w-[34ch] text-[12.5px] leading-snug text-ink-3">
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] font-[660] uppercase tracking-[0.09em] text-ink-3">
+          Readiness
+        </div>
+        <div className="mt-0.5 flex items-baseline gap-1.5">
+          <span className="text-[15px] font-[660]" style={{ color: b.color }}>{b.word}</span>
+          {asOf && <span className="text-[12px] text-ink-3">· {asOf}</span>}
+        </div>
+        <p className="mt-1 text-[12.5px] leading-snug text-ink-2">
           {driver?.headline || "Not enough data yet to calculate readiness."}
         </p>
-        <div className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-hairline
-                        bg-surface-2 px-2.5 py-1 text-[11.5px] text-ink-2">
-          <i className="h-[7px] w-[7px] shrink-0 rounded-full"
-             style={{ background: confColor(confidence) }} />
-          {Math.round(confidence * 100)}% confidence
-        </div>
       </div>
     </Card>
   );

@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ChevronRight } from "lucide-react";
-import { DATA, band, hm, label, toMiles } from "@/lib/data";
-import { Hero, MiniScore } from "@/components/Dials";
-import { Section } from "@/components/Charts";
-import { HeadroomCard } from "@/components/Headroom";
-import { DeviceStrip } from "@/components/DeviceStrip";
-import type { Tab } from "@/components/Nav";
+import { DATA, hm } from "@/lib/data";
+import { Hero } from "@/components/Dials";
+import { Card } from "@/components/ui/card";
+import { WhyThisScore } from "@/components/WhyThisScore";
+import { DeviceStrip, deviceNeedsAttention } from "@/components/DeviceStrip";
+import type { MetricDomain } from "@/pages/MetricsPage";
 
 function localDayKey(d = new Date()) {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"),
@@ -21,117 +21,87 @@ function impact(c: { score: number | null; weight: number }) {
   return c.score == null ? -1 : Math.abs(50 - c.score) * c.weight;
 }
 
-export function Today({ go }: { go: (t: Tab) => void }) {
-  const [all, setAll] = useState(false);
+function MetricCell({ label, value, note, onClick, vtName }: {
+  label: string; value: string; note: string; onClick: () => void; vtName?: string;
+}) {
+  return (
+    <button onClick={onClick} style={vtName ? { viewTransitionName: vtName } : undefined}
+            className="min-w-0 flex-1 px-2.5 py-3 text-left first:pl-3.5 last:pr-3.5 active:opacity-60">
+      <div className="truncate text-[10.5px] font-[660] uppercase tracking-[0.08em] text-ink-3">{label}</div>
+      <div className="tnum mt-1 truncate text-[18px] font-[640] leading-tight tracking-tight">{value}</div>
+      <div className="mt-0.5 truncate text-[10.5px] text-ink-3">{note}</div>
+    </button>
+  );
+}
+
+export function Today({ onOpenMetric, onOpenDevice }: {
+  onOpenMetric: (d: MetricDomain) => void;
+  onOpenDevice: () => void;
+}) {
+  const [whyOpen, setWhyOpen] = useState(false);
+  const whyRef = useRef<HTMLDivElement>(null);
   const R = DATA.readiness;
   const available = R.components.filter((c) => c.available);
-  const ranked = [...available].sort((a, b) => impact(b) - impact(a));
-  const shown = all ? ranked : ranked.slice(0, 3);
-  const hidden = ranked.length - shown.length;
-  const driver = [...available].sort((a, b) => a.score! - b.score!)[0];
+  const driver = [...available].sort((a, b) => impact(b) - impact(a))[0];
 
   const sleepComps = available.filter((c) => c.name.startsWith("sleep"));
   const sleepScore = sleepComps.length
     ? sleepComps.reduce((s, c) => s + c.score! * c.weight, 0) /
       sleepComps.reduce((s, c) => s + c.weight, 0) : null;
   const night = DATA.sleep.nights.find((n) => n.night_of === DATA.sleep.latest_night);
-  const rhr = R.components.find((c) => c.name === "resting_hr");
   const currentDay = localDayKey();
+  const nightScore = night?.night_of === R.day ? sleepScore : null;
+
+  const hrvMetric = DATA.trends?.metrics?.find((m) => m.key === "hrv");
+  const hrvBaseline = DATA.baselines?.hrv;
+  const hrvDelta = hrvMetric?.latest != null && hrvBaseline?.mean != null
+    ? hrvMetric.latest - hrvBaseline.mean : null;
+
   const latestSteps = DATA.steps[DATA.steps.length - 1];
   const stepsAreCurrent = latestSteps?.day === currentDay;
-  const sleepIsCurrent = night?.night_of === currentDay;
-  const nightScore = night?.night_of === R.day ? sleepScore : null;
-  const trendOf = (key: string) =>
-    DATA.trends?.metrics?.find((m) => m.key === key)?.weeks
-      .map((w) => w.value).filter((v): v is number => v != null);
+
+  function seeWhy() {
+    setWhyOpen(true);
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    whyRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+  }
 
   return (
     <>
-      <DeviceStrip />
-      <Hero score={R.score} confidence={R.confidence} driver={driver}
+      {deviceNeedsAttention() && (
+        <button onClick={onOpenDevice} className="block w-full text-left">
+          <DeviceStrip />
+        </button>
+      )}
+
+      <Hero score={R.score} driver={driver}
             asOf={R.day === currentDay ? undefined : shortDate(R.day)} />
 
-      <div className="mini-score-grid rise mb-3 grid gap-2.5">
-        <MiniScore score={nightScore}
-                   label={sleepIsCurrent || !night ? "Sleep" : `Sleep · ${shortDate(night.night_of)}`}
-                   value={night ? hm(night.asleep_min) : "—"}
-                   note={!night ? "no data"
-                     : nightScore == null ? "Not scored for this night"
-                     : `sleep score ${Math.round(nightScore)}/100`}
-                   spark={trendOf("sleep_min")} />
-        <MiniScore score={rhr?.available ? rhr.score! : null}
-                   label={R.day === currentDay ? "Resting HR" : `Resting HR · ${shortDate(R.day)}`}
-                   value={rhr?.display || "—"}
-                   note={rhr?.delta ? rhr.delta.replace(/ your .*/, " typical") : "no data"}
-                   spark={trendOf("resting_hr")} />
-      </div>
+      <Card className="rise mb-3 flex flex-row gap-0 divide-x divide-hairline border-hairline bg-surface-1 p-0">
+        <MetricCell label="Sleep" onClick={() => onOpenMetric("sleep")} vtName="vt-sleep"
+                    value={night ? hm(night.asleep_min) : "—"}
+                    note={!night ? "no data" : nightScore == null ? "not scored" : `score ${Math.round(nightScore)}`} />
+        <MetricCell label="HRV" onClick={() => onOpenMetric("heart")}
+                    value={hrvMetric?.latest != null ? `${hrvMetric.latest} ms` : "—"}
+                    note={hrvDelta == null ? "no baseline" : `${hrvDelta > 0 ? "+" : ""}${hrvDelta.toFixed(0)} vs usual`} />
+        <MetricCell label="Steps" onClick={() => onOpenMetric("activity")} vtName="vt-steps"
+                    value={latestSteps ? latestSteps.steps.toLocaleString() : "—"}
+                    note={!latestSteps ? "no data" : stepsAreCurrent ? "today" : shortDate(latestSteps.day)} />
+      </Card>
 
-      <HeadroomCard />
-
-      <Section title="Breakdown">
-        {shown.map((c) => {
-          const b = band(c.score);
-          return (
-            <div key={c.name} className="flex items-center gap-3 border-t border-hairline
-                                         py-2.5 first:border-t-0 first:pt-0">
-              <i className="h-2 w-2 shrink-0 rounded-full" style={{ background: b.color }} />
-              <div className="min-w-0 flex-1">
-                <div className="text-[14px] font-medium">{label(c.name)}</div>
-                <div className="text-[12px] text-ink-3">{c.delta || c.explain}</div>
-              </div>
-              {/* The measured quantity leads. A bare 0-100 index here read as
-                  ambiguous ("10 what?"); it survives only in the detail view. */}
-              <span className="tnum shrink-0 text-[15px] font-[660]"
-                    style={{ color: b.color }}>{c.display || Math.round(c.score!)}</span>
-            </div>
-          );
-        })}
-        {hidden > 0 && !all && (
-          <button onClick={() => setAll(true)}
-                  className="mt-1 flex min-h-[44px] w-full items-center justify-center gap-1
-                             text-[13px] font-medium text-brand active:opacity-60">
-            Show all {ranked.length} <ChevronRight size={14} />
+      {driver?.headline && (
+        <Card className="rise mb-3 border-hairline bg-surface-1 p-[18px]">
+          <p className="text-[14px] leading-snug">{driver.headline}</p>
+          <button onClick={seeWhy}
+                  className="mt-2.5 flex min-h-[32px] items-center gap-1 text-[12.5px]
+                             font-medium text-brand active:opacity-60">
+            See why <ChevronRight size={13} />
           </button>
-        )}
-        {all && (
-          <button onClick={() => setAll(false)}
-                  className="mt-1 flex min-h-[44px] w-full items-center justify-center
-                             text-[13px] font-medium text-brand active:opacity-60">
-            Show less
-          </button>
-        )}
-      </Section>
+        </Card>
+      )}
 
-      {/* jump-offs: everything reachable within three taps */}
-      <div className="today-jump-grid rise mb-3 grid gap-2.5">
-        <button onClick={() => go("activity")}
-                style={{ viewTransitionName: "vt-steps" }}
-                className="min-h-[44px] flex-1 rounded-[13px] border border-hairline
-                           bg-surface-1 p-3.5 text-left active:opacity-70">
-          <div className="text-[10px] font-[660] uppercase leading-tight tracking-[0.1em] text-ink-3">
-            {stepsAreCurrent ? "Steps today" : latestSteps ? `Steps · ${shortDate(latestSteps.day)}` : "Steps"}
-          </div>
-          <div className="tnum mt-1.5 text-[24px] font-[640] leading-none tracking-tight">
-            {latestSteps ? latestSteps.steps.toLocaleString() : "—"}</div>
-          <div className="mt-1 text-[11.5px] leading-snug text-ink-3">
-            {latestSteps
-              ? `${toMiles(latestSteps.distance_raw).toFixed(1)} mi${stepsAreCurrent ? "" : " · no data today"}`
-              : "no data today"}</div>
-        </button>
-        <button onClick={() => go("sleep")}
-                style={{ viewTransitionName: "vt-sleep" }}
-                className="min-h-[44px] flex-1 rounded-[13px] border border-hairline
-                           bg-surface-1 p-3.5 text-left active:opacity-70">
-          <div className="text-[10px] font-[660] uppercase leading-tight tracking-[0.1em] text-ink-3">
-            {sleepIsCurrent ? "Last night" : night ? `Sleep · ${shortDate(night.night_of)}` : "Last night"}
-          </div>
-          <div className="tnum mt-1.5 text-[24px] font-[640] leading-none tracking-tight">
-            {night ? hm(night.asleep_min) : "—"}</div>
-          <div className="mt-1 text-[11.5px] leading-snug text-ink-3">
-            {night
-              ? `${Math.round(night.efficiency)}%${night.awake_min === 0 ? " may be high · zero wakes" : " efficiency"}${sleepIsCurrent ? "" : ` · no data ${shortDate(currentDay)}`}`
-              : `no data ${shortDate(currentDay)}`}</div>
-        </button>
+      <div ref={whyRef}>
+        <WhyThisScore open={whyOpen} onOpenChange={setWhyOpen} />
       </div>
     </>
   );
