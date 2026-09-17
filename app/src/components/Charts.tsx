@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Line, LineChart, ResponsiveContainer, ReferenceLine, Tooltip, XAxis, YAxis, CartesianGrid,
 } from "recharts";
@@ -142,6 +142,22 @@ function NightSeries({ label, pts, t0, total, fmt }: {
    outside as real text. Bars are positioned by percentage.                    */
 export function Hypnogram({ segments, night, title = "Sleep" }:
   { segments: Segment[]; night: string | null; title?: string }) {
+  /* Real rendered pixel width of the chart area, measured rather than
+     assumed. The SVG below needs x and y in the SAME physical unit -- a
+     viewBox stretched to fill "however wide the card ends up" with
+     preserveAspectRatio="none" makes 1 x-unit a DIFFERENT real size than
+     1 y-unit, and every "put this point 3px from the tip" calculation
+     quietly breaks, off by whatever that stretch ratio happens to be. */
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [chartW, setChartW] = useState(280);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => setChartW(entries[0].contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   if (!segments.length) {
     return <Section title={title}><p className="py-1.5 text-[12.5px] text-ink-3">
       No sleep recorded yet. Wear the ring overnight.</p></Section>;
@@ -160,14 +176,17 @@ export function Hypnogram({ segments, night, title = "Sleep" }:
     elapsed: state.elapsed + sg.minutes,
   }), { rows: [], elapsed: 0 }).rows;
 
-  /* ---- level geometry, shared by the SVG trace and the label column below ----
-     One continuous path now, not four lane tracks: each stage is a LEVEL the
-     line sits at, not a row it lives in. LABEL_W has to agree with the label
-     column's real rendered width (w-11 + the gap beside it) or the hour
-     ticks/time-range text below drift out of alignment with the trace. */
-  const LEVEL_H = 20, LABEL_W = 52;
-  const svgH = STAGE_ORDER.length * LEVEL_H;
-  const yOf = (stage: string) => STAGE_ORDER.indexOf(stage) * LEVEL_H + LEVEL_H / 2;
+  /* ---- lane geometry, shared by the bars and the connector/gridline overlay ----
+     Four lanes, matching Apple's own sleep-stage chart: each stage keeps its
+     own row (rounded pill segments, no lane background track), and thin
+     NEUTRAL threads -- not coloured, not thick -- link one segment to the
+     next across rows so the night reads as one path without the bars
+     themselves pretending to be a single continuous shape. LABEL_W has to
+     agree with the label column's real rendered width (w-11 + the gap beside
+     it) or the ticks/time-range text below drift out of alignment. */
+  const ROW_H = 34, LABEL_W = 52;
+  const laneY = (stage: string) => STAGE_ORDER.indexOf(stage) * ROW_H + ROW_H / 2;
+  const stackH = STAGE_ORDER.length * ROW_H;
   const pctOf = (d: Date) => ((d.getTime() - t0.getTime()) / 6e4 / total) * 100;
 
   /* Wall-clock ticks on even hours, the way a clock reads -- not evenly spaced
@@ -207,46 +226,107 @@ export function Hypnogram({ segments, night, title = "Sleep" }:
     .filter((p) => inWindow(p.at))
     .sort((a, b) => a.at.getTime() - b.at.getTime());
 
+  /* Geometry computed ONCE and shared by the gradient defs and the line
+     itself -- the gradient's own vector has to match the drawn segment's
+     actual endpoints exactly, or the line's tip samples some interior point
+     of a longer ramp instead of the pure stage colour.
+
+     x and y are BOTH real px here (chartW-based, not a 0-1000 stretch), so
+     this circle geometry is now measuring the same thing on both axes: the
+     pill is a true rounded-full capsule, radius 12 (half its own 24px
+     height), its rounded end a semicircle of that radius centred 12px back
+     from the tip. Picking the x-inset and y-margin as a matched pair on
+     that circle (margin = sqrt(12^2 - (12-inset)^2)) is what makes "closer
+     to the border" and "still safely buried" both true at once. */
+  const CAP_R = 12;
+  const capInset = 3; // real px back from the pill's true tip
+  const edgeMargin = Math.sqrt(CAP_R * CAP_R - (CAP_R - capInset) * (CAP_R - capInset));
+  // chartW is measured directly off the wrapper that's ALREADY offset by
+  // LABEL_W (left: LABEL_W in its own style below) -- it already excludes
+  // the label column, so using it as-is here, not subtracting LABEL_W again.
+  const chartInner = Math.max(1, chartW);
+  const xOf = (pct: number) => (pct / 100) * chartInner;
+  const connectors = placed.slice(0, -1).map((p, i) => {
+    const next = placed[i + 1];
+    if (next.stage === p.stage) return null;
+    const y1 = laneY(p.stage), y2 = laneY(next.stage);
+    const dir = Math.sign(y2 - y1);
+    const xB = xOf(p.left + p.width);
+    return {
+      id: `hypno-grad-${i}`,
+      x1: xB - capInset, y1: y1 + dir * edgeMargin,
+      x2: xB + capInset, y2: y2 - dir * edgeMargin,
+      fromColor: STAGE_COLOR[p.stage] ?? "var(--ink-3)",
+      toColor: STAGE_COLOR[next.stage] ?? "var(--ink-3)",
+    };
+  }).filter((c): c is NonNullable<typeof c> => c != null);
+
   return (
     <Section title={title} right={night ? nightLabel : undefined}>
       <div className="relative">
-        <div className="flex gap-2">
-          <div className="flex w-11 shrink-0 flex-col text-right text-[10.5px] text-ink-3"
-               style={{ height: svgH }}>
-            {STAGE_ORDER.map((stage) => (
-              <span key={stage} className="flex flex-1 items-center justify-end">{stage}</span>
-            ))}
-          </div>
-          {/* One continuous trace, not four lane tracks: each stage is a LEVEL
-              the line sits AT, stepping up and down as the night moves through
-              them, rounded caps at every join so it reads as one flowing shape
-              instead of separate floating bars. */}
-          <svg viewBox={`0 0 1000 ${svgH}`} width="100%" height={svgH}
-               preserveAspectRatio="none" className="block flex-1" role="img"
-               aria-label={`Sleep stages over the night, from ${fmt(t0)} to ${fmt(end)}`}>
+        {/* Gridlines, row dividers, and connectors all share ONE svg, drawn
+            in that order, so nothing about "what paints on top of what" is
+            left to separate positioned siblings and DOM-order guessing. The
+            row dividers used to be a plain CSS border-t on the row divs
+            below, which -- painting AFTER this svg -- sat on top of any
+            connector crossing them. Pills (below) still paint last, on top
+            of all three. */}
+        <div ref={wrapRef} className="pointer-events-none absolute inset-y-0 right-0"
+             style={{ left: LABEL_W }}>
+          <svg width={chartInner} height={stackH} viewBox={`0 0 ${chartInner} ${stackH}`}
+               aria-hidden="true">
+            <defs>
+              {connectors.map((c) => (
+                <linearGradient key={c.id} id={c.id} gradientUnits="userSpaceOnUse"
+                                x1={c.x1} y1={c.y1} x2={c.x2} y2={c.y2}>
+                  <stop offset="0%" stopColor={c.fromColor} />
+                  <stop offset="100%" stopColor={c.toColor} />
+                </linearGradient>
+              ))}
+            </defs>
             {ticks.map((d, i) => (
-              <line key={`g${i}`} x1={pctOf(d) * 10} x2={pctOf(d) * 10} y1={0} y2={svgH}
+              <line key={`g${i}`} x1={xOf(pctOf(d))} x2={xOf(pctOf(d))} y1={0} y2={stackH}
                     stroke="var(--ink-3)" strokeOpacity={0.16} strokeWidth={1} />
             ))}
-            {placed.slice(0, -1).map((p, i) => {
-              const next = placed[i + 1];
-              if (next.stage === p.stage) return null;
-              const x = (p.left + p.width) * 10;
-              return (
-                <line key={`c${i}`} x1={x} x2={x} y1={yOf(p.stage)} y2={yOf(next.stage)}
-                      stroke={STAGE_COLOR[next.stage] ?? "var(--ink-3)"}
-                      strokeWidth={6} strokeLinecap="round" />
-              );
-            })}
-            {placed.map((p, i) => (
-              <line key={`s${i}`} x1={p.left * 10} x2={(p.left + p.width) * 10}
-                    y1={yOf(p.stage)} y2={yOf(p.stage)}
-                    stroke={STAGE_COLOR[p.stage] ?? "var(--ink-3)"}
-                    strokeWidth={6} strokeLinecap="round">
-                <title>{`${p.stage} · ${p.minutes} min · from ${p.start_ts.slice(11, 16)}`}</title>
-              </line>
+            {STAGE_ORDER.slice(1).map((_, idx) => (
+              <line key={`row${idx}`} x1={0} x2={chartInner} y1={(idx + 1) * ROW_H} y2={(idx + 1) * ROW_H}
+                    stroke="var(--hairline)" strokeWidth={1} />
+            ))}
+            {/* ONE real diagonal line per transition, not a vertical strip
+                straddling the shared boundary -- a straddling strip is
+                always exposed on one side, since the departing pill's fill
+                ends exactly at that x and the arriving pill's starts
+                exactly there too, on the OTHER side. Ends land near each
+                pill's OUTER edge (a couple px shy of the true rounded
+                boundary, still safely buried once the pill paints on top)
+                rather than at its dead centre, so the join reads as
+                touching the pill's edge -- the thing it's actually
+                connecting to -- not piercing its middle. The
+                <linearGradient>'s own vector matches these exact endpoints,
+                so the tips sample the pure stage colour. Rounded caps echo
+                the pill's own rounding at the point of contact. */}
+            {connectors.map((c) => (
+              <line key={c.id} x1={c.x1} y1={c.y1} x2={c.x2} y2={c.y2}
+                    stroke={`url(#${c.id})`} strokeWidth={3} strokeLinecap="round" />
             ))}
           </svg>
+        </div>
+
+        <div className="relative flex flex-col">
+          {STAGE_ORDER.map((stage) => (
+            <div key={stage} className="flex items-center gap-2" style={{ height: ROW_H }}>
+              <span className="w-11 shrink-0 text-right text-[10.5px] text-ink-3">{stage}</span>
+              <div className="relative h-full flex-1">
+                {placed.filter((p) => p.stage === stage).map((p, i) => (
+                  <div key={i}
+                       title={`${p.stage} · ${p.minutes} min · from ${p.start_ts.slice(11, 16)}`}
+                       className="absolute inset-y-[5px] rounded-full"
+                       style={{ left: `${p.left}%`, width: `max(8px, ${p.width}%)`,
+                                background: STAGE_COLOR[p.stage] ?? "var(--ink-3)" }} />
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
 
         <NightSeries label="heart rate" pts={hrPts} t0={t0} total={total}
